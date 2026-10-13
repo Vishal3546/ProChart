@@ -1,0 +1,99 @@
+/* ProChart Terminal™ - Styles 2026 */
+:root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-tertiary: #1a2332;
+    --border-color: #1e293b;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --bull-color: #00c853;
+    --bull-bg: rgba(0, 200, 83, 0.1);
+    --bear-color: #ff1744;
+    --bear-bg: rgba(255, 23, 68, 0.1);
+    --accent-blue: #2196f3;
+    --accent-purple: #7c4dff;
+    --accent-orange: #ff9100;
+    --accent-cyan: #00e5ff;
+    --accent-gold: #ffd740;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'Inter', sans-serif;
+    --radius-md: 8px;
+    --transition: all 0.2s ease;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font-sans); background: var(--bg-primary); color: var(--text-primary); overflow: hidden; height: 100vh; width: 100vw; }
+
+.splash-screen { position: fixed; inset: 0; background: #0a0e17; display: flex; align-items: center; justify-content: center; z-index: 10000; }
+.splash-content { text-align: center; }
+.logo-icon { width: 70px; height: 70px; border-radius: 18px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; font-size: 32px; color: white; }
+.splash-logo h1 { font-size: 28px; font-weight: 800; margin-bottom: 6px; }
+.splash-loader { margin-top: 30px; width: 280px; }
+.loader-bar { height: 3px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden; }
+.loader-fill { height: 100%; background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan)); animation: loaderAnim 2.5s ease forwards; width: 0%; }
+@keyframes loaderAnim { to { width: 100%; } }
+.loader-text { display: block; margin-top: 10px; color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); }
+
+.app-container { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+.top-navbar { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 12px; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+.nav-left, .nav-center, .nav-right { display: flex; align-items: center; gap: 8px; }
+.logo { font-size: 16px; font-weight: 800; color: var(--accent-blue); margin-right: 10px; }
+
+.symbol-btn { display: flex; align-items: center; gap: 8px; padding: 5px 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: var(--radius-md); color: var(--text-primary); cursor: pointer; }
+.symbol-name { font-weight: 700; font-size: 13px; }
+.symbol-price.up { color: var(--bull-color); } .symbol-price.down { color: var(--bear-color); }
+.symbol-change { font-size: 11px; padding: 2px 5px; border-radius: 4px; }
+.symbol-change.up { background: var(--bull-bg); color: var(--bull-color); }
+.symbol-change.down { background: var(--bear-bg); color: var(--bear-color); }
+
+.timeframe-selector, .chart-type-selector { display: flex; gap: 2px; padding: 3px; background: var(--bg-tertiary); border-radius: var(--radius-md); }
+.tf-btn, .ct-btn { padding: 4px 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 11px; font-weight: 600; font-family: var(--font-mono); border-radius: 4px; cursor: pointer; }
+.tf-btn.active, .ct-btn.active { background: var(--accent-blue); color: white; }
+
+.nav-btn { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; border-radius: var(--radius-md); cursor: pointer; }
+.nav-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+.main-content { display: flex; flex: 1; overflow: hidden; }
+.left-toolbar { width: 42px; background: var(--bg-secondary); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 8px 4px; gap: 4px; flex-shrink: 0; }
+.tool-btn { width: 34px; height: 34px; border: none; background: transparent; color: var(--text-secondary); border-radius: 6px; cursor: pointer; }
+.tool-btn.active, .tool-btn:hover { color: var(--accent-blue); background: rgba(33,150,243,0.1); }
+
+.chart-wrapper { flex: 1; position: relative; background: var(--bg-primary); overflow: hidden; }
+#mainChart { width: 100%; cursor: crosshair; }
+#volumeChart { width: 100%; position: absolute; bottom: 30px; left: 0; }
+
+.crosshair-info { position: absolute; top: 8px; left: 12px; z-index: 10; display: flex; gap: 12px; font-family: var(--font-mono); font-size: 11px; background: rgba(10,14,23,0.85); padding: 4px 10px; border-radius: 4px; backdrop-filter: blur(8px); }
+.price-scale { position: absolute; top: 0; right: 0; width: 70px; height: calc(100% - 30px); background: var(--bg-secondary); border-left: 1px solid var(--border-color); }
+.time-scale { position: absolute; bottom: 0; left: 0; right: 70px; height: 30px; background: var(--bg-secondary); border-top: 1px solid var(--border-color); }
+
+.right-panel { width: 320px; background: var(--bg-secondary); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0; }
+.panel-section { border-bottom: 1px solid var(--border-color); }
+.panel-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: var(--bg-tertiary); font-size: 12px; font-weight: 700; }
+.panel-body { padding: 10px 14px; }
+
+.pro-card { background: var(--bg-tertiary); padding: 8px 10px; border-radius: 6px; margin-bottom: 6px; border: 1px solid var(--border-color); }
+.card-title { font-size: 9px; color: var(--text-muted); font-weight: 700; letter-spacing: 0.5px; }
+.card-val { font-size: 11px; font-weight: 800; margin-top: 2px; }
+.card-sub { font-size: 9px; color: var(--text-secondary); margin-top: 2px; line-height: 1.3; }
+.danger-btn { width: 100%; padding: 6px; background: var(--bear-bg); border: 1px solid var(--bear-color); color: var(--bear-color); font-weight: 700; border-radius: 6px; font-size: 10px; cursor: pointer; margin-top: 4px; }
+
+.greeks-inputs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+.greeks-inputs input, .greeks-inputs select { width: 100%; padding: 4px 6px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); font-size: 10px; }
+.greeks-display { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+.greek-card { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; padding: 6px; text-align: center; }
+.greek-symbol { font-size: 16px; font-weight: 800; }
+.greek-value { font-family: var(--font-mono); font-size: 14px; font-weight: 700; margin: 2px 0; }
+.greek-interp { font-size: 8px; color: var(--text-muted); }
+
+.combo-signal { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; }
+.combo-header { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; }
+.combo-verdict { font-size: 16px; font-weight: 800; text-align: center; padding: 4px; margin: 4px 0; border-radius: 4px; background: rgba(0,200,83,0.1); }
+.combo-details { font-size: 9px; color: var(--text-secondary); }
+
+.breakout-box { padding: 8px; border-radius: 6px; background: var(--bg-tertiary); font-size: 10px; font-weight: 700; text-align: center; }
+
+.status-bar { display: flex; align-items: center; justify-content: space-between; height: 24px; padding: 0 12px; background: var(--bg-secondary); border-top: 1px solid var(--border-color); font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); flex-shrink: 0; }
+.toast-container { position: fixed; bottom: 30px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 6px; }
+.toast { padding: 10px 14px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; font-size: 11px; backdrop-filter: blur(10px); }
+.toast.success { border-left: 3px solid var(--bull-color); } .toast.error { border-left: 3px solid var(--bear-color); }

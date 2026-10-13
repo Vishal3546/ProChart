@@ -1,0 +1,3 @@
+class OrderFlowAbsorptionEngine {
+    scanAbsorption() { return []; }
+}
