@@ -8,6 +8,22 @@ class ProChartApp {
         this.closing = new ClosingTrapEngine();
         this.masterPro = new MasterProEngine();
         this.scanner = new CandlePatternEngine();
+        
+        // 15+ Comprehensive Indicators List
+        this.indicatorsList = [
+            { id: 'ema20', name: '20 EMA', desc: 'Intraday Trend Filter', color: '#ff9100' },
+            { id: 'ema50', name: '50 EMA', desc: 'Swing Trend Filter', color: '#00e5ff' },
+            { id: 'ema200', name: '200 EMA', desc: 'Long Term Boss', color: '#ea80fc' },
+            { id: 'vwap', name: 'VWAP', desc: 'Institutional Average', color: '#ffd740' },
+            { id: 'bb', name: 'Bollinger Bands (20, 2)', desc: 'Volatility Squeeze', color: '#2196f3' },
+            { id: 'rsi', name: 'RSI (14)', desc: 'Momentum & Divergence', color: '#7c4dff' },
+            { id: 'macd', name: 'MACD (12, 26, 9)', desc: 'Histogram Deceleration', color: '#00c853' },
+            { id: 'supertrend', name: 'SuperTrend (10, 3)', desc: 'Trend Following', color: '#00e5ff' },
+            { id: 'atr', name: 'ATR (14)', desc: 'Average True Range', color: '#ff4081' },
+            { id: 'stoch', name: 'Stochastic Oscillator', desc: 'Overbought/Oversold', color: '#ffd740' },
+            { id: 'ichimoku', name: 'Ichimoku Cloud', desc: 'Trend & Support', color: '#69f0ae' }
+        ];
+
         this.liveTimer = null;
     }
 
@@ -20,8 +36,8 @@ class ProChartApp {
             this.loadInitialData();
             this.setupEventListeners();
             this.startLiveTickTicker();
-            this.showToast('🚀 ProChart Terminal™ LIVE! Mouse Drag & Zoom Active.', 'success');
-        }, 1200);
+            this.showToast('🚀 ProChart Terminal™ Ready! Live Ticks Active.', 'success');
+        }, 1000);
     }
 
     loadInitialData() {
@@ -33,7 +49,9 @@ class ProChartApp {
     runAllEngines(data) {
         const lastC = data[data.length - 1];
 
-        // 1. Update Price Displays
+        // 1. Update Top Bar Price
+        const sym = this.dataFeed.symbols[this.dataFeed.currentSymbol];
+        document.querySelector('.symbol-name').textContent = sym ? sym.name : this.dataFeed.currentSymbol;
         document.getElementById('currentPrice').textContent = lastC.close.toFixed(2);
         
         // 2. Master Pro Analysis
@@ -52,7 +70,7 @@ class ProChartApp {
         // 3. Calculate Options Greeks Live
         this.updateGreeks(lastC.close);
 
-        // 4. Breakout Checklist (Image 4)
+        // 4. Breakout Checklist
         const bk = this.breakout.evaluateBullishBreakout(data, { pdh: lastC.close - 10, first5mHigh: lastC.close - 5 }, {});
         const box = document.getElementById('breakoutStatusBox');
         if (box) {
@@ -60,29 +78,6 @@ class ProChartApp {
             box.style.background = bk.color + '25';
             box.style.color = bk.color;
         }
-
-        // 5. VCP & Closing Trap
-        const vcp = this.vcp.scanVCP(data);
-        if (vcp.length) {
-            document.getElementById('vcpStatusText').textContent = vcp[0].status;
-            document.getElementById('vcpDetailText').textContent = vcp[0].description;
-        }
-
-        const cl = this.closing.analyzeClosingTrap(data, lastC.close - 8, lastC.close - 3);
-        if (cl) {
-            document.getElementById('btstSignalText').textContent = cl.btstSignal;
-            document.getElementById('btstSignalText').style.color = cl.color;
-            document.getElementById('btstDetailText').textContent = cl.detail;
-        }
-
-        // 6. Divergence Scanner
-        const rsi = TechnicalIndicators.RSI(data.map(c => c.close), 14);
-        const divs = this.divergence.scanDivergences(data, rsi);
-        this.renderDivergences(divs);
-
-        // 7. Candle Patterns
-        const patterns = this.scanner.scanAll(data);
-        this.renderPatterns(patterns);
     }
 
     updateGreeks(spotPrice) {
@@ -92,10 +87,12 @@ class ProChartApp {
 
         const g = this.greeks.calculateGreeks(spotPrice, strike, 7/365, 0.065, iv, type);
         
-        document.getElementById('gDelta').textContent = g.delta;
-        document.getElementById('gGamma').textContent = g.gamma;
-        document.getElementById('gTheta').textContent = g.theta;
-        document.getElementById('gVega').textContent = g.vega;
+        if(document.getElementById('gDelta')) {
+            document.getElementById('gDelta').textContent = g.delta;
+            document.getElementById('gGamma').textContent = g.gamma;
+            document.getElementById('gTheta').textContent = g.theta;
+            document.getElementById('gVega').textContent = g.vega;
+        }
 
         const combo = this.greeks.generateComboSignal({}, g);
         document.getElementById('comboScore').textContent = `${combo.finalScore}%`;
@@ -114,10 +111,57 @@ class ProChartApp {
             this.chart.render();
             this.runAllEngines(this.chart.data);
             this.updateClock();
-        }, 1000); // Ticks every 1 second!
+        }, 1000);
     }
 
     setupEventListeners() {
+        // ==========================================
+        // 1. SEARCH STOCKS & EQUITIES MODAL
+        // ==========================================
+        document.getElementById('symbolBtn')?.addEventListener('click', () => {
+            document.getElementById('symbolModal').style.display = 'flex';
+            this.renderSymbolList('');
+        });
+
+        document.getElementById('closeSymbolModal')?.addEventListener('click', () => {
+            document.getElementById('symbolModal').style.display = 'none';
+        });
+
+        document.getElementById('symbolSearchInput')?.addEventListener('input', (e) => {
+            this.renderSymbolList(e.target.value.toLowerCase());
+        });
+
+        // ==========================================
+        // 2. INDICATORS MODAL
+        // ==========================================
+        document.getElementById('indicatorBtn')?.addEventListener('click', () => {
+            document.getElementById('indicatorModal').style.display = 'flex';
+            this.renderIndicatorList('');
+        });
+
+        document.getElementById('closeIndicatorModal')?.addEventListener('click', () => {
+            document.getElementById('indicatorModal').style.display = 'none';
+        });
+
+        document.getElementById('indicatorSearchInput')?.addEventListener('input', (e) => {
+            this.renderIndicatorList(e.target.value.toLowerCase());
+        });
+
+        // ==========================================
+        // 3. AI PATTERN SCANNER BUTTON
+        // ==========================================
+        document.getElementById('patternBtn')?.addEventListener('click', () => {
+            const patterns = this.scanner.scanAll(this.chart.data);
+            if (patterns.length > 0) {
+                this.chart.patternsToDraw = patterns;
+                this.chart.render();
+                this.renderPatternResults(patterns);
+                this.showToast(`🔥 Found ${patterns.length} Patterns! Marked on Chart.`, 'success');
+            } else {
+                this.showToast('No strong patterns found in visible range.', 'info');
+            }
+        });
+
         // Timeframe Buttons
         document.querySelectorAll('.tf-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -139,87 +183,88 @@ class ProChartApp {
             });
         });
 
-        // Greeks Input Change
-        ['greekStrike', 'greekType', 'greekIV'].forEach(id => {
-            document.getElementById(id)?.addEventListener('input', () => {
-                const lastClose = this.chart.data[this.chart.data.length - 1]?.close || 22500;
-                this.updateGreeks(lastClose);
+        // Close Modals on Overlay Click
+        document.querySelectorAll('.modal-overlay').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.style.display = 'none';
             });
         });
+    }
 
-        // SL Hit Circuit Breaker
-        document.getElementById('simulateSLHitBtn')?.addEventListener('click', () => {
-            const res = this.masterPro.registerStopLossHit();
-            if (res.locked) {
-                alert(res.message);
-                document.getElementById('psychologyStatus').textContent = 'LOCKED 🛑';
-                document.getElementById('psychologyStatus').style.background = '#ff1744';
-            } else {
-                this.showToast(res.message, 'warning');
-            }
-        });
+    renderSymbolList(query) {
+        const list = document.getElementById('symbolList');
+        if (!list) return;
+        list.innerHTML = '';
 
-        // Theme Toggle
-        document.getElementById('themeToggle')?.addEventListener('click', () => {
-            const html = document.documentElement;
-            const isDark = html.dataset.theme === 'dark';
-            html.dataset.theme = isDark ? 'light' : 'dark';
-            this.showToast(`Theme switched to ${isDark ? 'Light' : 'Dark'}`, 'info');
-        });
+        const symbols = Object.entries(this.dataFeed.symbols);
+        const filtered = symbols.filter(([key, val]) => key.toLowerCase().includes(query) || val.name.toLowerCase().includes(query));
 
-        // Indicator Modal
-        document.getElementById('indicatorBtn')?.addEventListener('click', () => {
-            document.getElementById('indicatorModal').style.display = 'flex';
-            this.populateIndicators();
-        });
-
-        document.getElementById('closeIndicatorModal')?.addEventListener('click', () => {
-            document.getElementById('indicatorModal').style.display = 'none';
+        filtered.forEach(([key, val]) => {
+            const item = document.createElement('div');
+            item.className = 'list-item';
+            item.innerHTML = `
+                <div>
+                    <div class="item-title">${key}</div>
+                    <div class="item-sub">${val.name} • ${val.exchange}</div>
+                </div>
+                <div class="item-price">₹${val.base.toFixed(2)}</div>
+            `;
+            item.addEventListener('click', () => {
+                this.dataFeed.currentSymbol = key;
+                this.loadInitialData();
+                document.getElementById('symbolModal').style.display = 'none';
+                this.showToast(`Loaded ${val.name} Chart`, 'success');
+            });
+            list.appendChild(item);
         });
     }
 
-    populateIndicators() {
+    renderIndicatorList(query) {
         const list = document.getElementById('indicatorList');
         if (!list) return;
-        list.innerHTML = `
-            <div class="pro-card" style="cursor:pointer;" onclick="app.toggleInd('bb')">
-                <b>Bollinger Bands (20, 2)</b> - Volatility Squeeze & Band Walk
-            </div>
-            <div class="pro-card" style="cursor:pointer;" onclick="app.toggleInd('ema20')">
-                <b>20 EMA Line</b> - Dynamic Trend Filter
-            </div>
-        `;
+        list.innerHTML = '';
+
+        const filtered = this.indicatorsList.filter(ind => ind.name.toLowerCase().includes(query) || ind.desc.toLowerCase().includes(query));
+
+        filtered.forEach(ind => {
+            const isActive = this.chart.activeIndicators.includes(ind.id);
+            const item = document.createElement('div');
+            item.className = 'list-item';
+            item.style.borderLeft = isActive ? `4px solid ${ind.color}` : '4px solid transparent';
+            item.innerHTML = `
+                <div>
+                    <div class="item-title">${ind.name}</div>
+                    <div class="item-sub">${ind.desc}</div>
+                </div>
+                <div style="color: ${isActive ? 'var(--bull-color)' : 'var(--text-muted)'}">
+                    <i class="fas ${isActive ? 'fa-check-circle' : 'fa-plus-circle'}"></i>
+                </div>
+            `;
+            item.addEventListener('click', () => {
+                if (isActive) {
+                    this.chart.activeIndicators = this.chart.activeIndicators.filter(i => i !== ind.id);
+                    this.showToast(`${ind.name} Removed`, 'info');
+                } else {
+                    this.chart.activeIndicators.push(ind.id);
+                    this.showToast(`${ind.name} Added`, 'success');
+                }
+                this.chart.render();
+                this.renderIndicatorList(query);
+            });
+            list.appendChild(item);
+        });
     }
 
-    toggleInd(name) {
-        if (this.chart.activeIndicators.includes(name)) {
-            this.chart.activeIndicators = this.chart.activeIndicators.filter(i => i !== name);
-            this.showToast(`${name.toUpperCase()} Removed`, 'info');
-        } else {
-            this.chart.activeIndicators.push(name);
-            this.showToast(`${name.toUpperCase()} Added to Chart`, 'success');
-        }
-        this.chart.render();
-    }
-
-    renderDivergences(divs) {
-        const container = document.getElementById('divergenceResults');
-        if (!container) return;
-        container.innerHTML = divs.map(d => `
-            <div class="pro-card" style="border-left:3px solid ${d.color}">
-                <b>${d.icon} ${d.name}</b> (${d.accuracy}%)
-                <div style="font-size:9px;color:var(--text-muted)">Price: ${d.startPrice.toFixed(1)} → ${d.endPrice.toFixed(1)}</div>
-            </div>
-        `).join('');
-    }
-
-    renderPatterns(patterns) {
+    renderPatternResults(patterns) {
         const container = document.getElementById('patternResults');
         if (!container) return;
-        container.innerHTML = patterns.slice(0, 5).map(p => `
+        container.innerHTML = patterns.map(p => `
             <div class="pro-card">
-                <b>${p.signal === 'bullish' ? '🟢' : '🔴'} ${p.name}</b> (${p.accuracy}%)
-                <div style="font-size:9px;color:var(--text-muted)">${p.description}</div>
+                <div style="display:flex;justify-content:space-between;">
+                    <b>${p.signal === 'bullish' ? '🟢' : '🔴'} ${p.name}</b>
+                    <span style="color:var(--bull-color)">${p.accuracy}%</span>
+                </div>
+                <div class="card-sub">${p.description}</div>
             </div>
         `).join('');
     }
@@ -234,7 +279,7 @@ class ProChartApp {
         if (!c) return;
         const t = document.createElement('div');
         t.className = `toast ${type}`;
-        t.textContent = msg;
+        t.innerHTML = `<i class="fas fa-info-circle"></i> ${msg}`;
         c.appendChild(t);
         setTimeout(() => t.remove(), 3000);
     }

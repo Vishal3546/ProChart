@@ -1,4 +1,3 @@
-// Fully Interactive Chart Engine 2026
 class ChartEngine {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
@@ -9,9 +8,10 @@ class ChartEngine {
         this.data = [];
         this.candleWidth = 10;
         this.candleSpacing = 4;
-        this.offset = 0; // Scroll offset
+        this.offset = 0;
         this.chartType = 'candle';
-        this.activeIndicators = ['ema20', 'bb']; // Default active
+        this.activeIndicators = ['ema20', 'bb'];
+        this.patternsToDraw = [];
         this.crosshair = { x: 0, y: 0, visible: false };
         this.isDragging = false;
         this.dragStartX = 0;
@@ -32,14 +32,13 @@ class ChartEngine {
         const h = parent.clientHeight;
         
         this.canvas.width = w;
-        this.canvas.height = h - 35;
+        this.canvas.height = h - 30;
         this.volCanvas.width = w;
         this.volCanvas.height = 60;
         this.render();
     }
 
     setupEvents() {
-        // MOUSE PAN & DRAG
         this.canvas.addEventListener('mousedown', (e) => {
             this.isDragging = true;
             this.dragStartX = e.clientX;
@@ -68,7 +67,6 @@ class ChartEngine {
             this.canvas.style.cursor = 'crosshair';
         });
 
-        // MOUSE WHEEL ZOOM
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
             if (e.deltaY < 0) {
@@ -100,7 +98,7 @@ class ChartEngine {
         if (!this.data || this.data.length === 0) return;
 
         const ctx = this.ctx;
-        const w = this.canvas.width - 70; // 70px right price scale
+        const w = this.canvas.width - 70;
         const h = this.canvas.height;
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
@@ -111,7 +109,6 @@ class ChartEngine {
 
         if (visibleData.length === 0) return;
 
-        // Calculate Min/Max Price
         let minPrice = Infinity, maxPrice = -Infinity;
         visibleData.forEach(c => {
             if (c.low < minPrice) minPrice = c.low;
@@ -121,7 +118,7 @@ class ChartEngine {
 
         const priceToY = (price) => h - 20 - ((price - minPrice) / range) * (h - 40);
 
-        // 1. Draw Grid
+        // 1. Grid Lines
         ctx.strokeStyle = 'rgba(255,255,255,0.04)';
         ctx.lineWidth = 1;
         for (let i = 0; i < 5; i++) {
@@ -129,15 +126,13 @@ class ChartEngine {
             ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
         }
 
-        // 2. Draw Indicators (Bollinger Bands & EMA 20)
+        // 2. Active Indicators
         if (this.activeIndicators.includes('bb')) {
             const closes = this.data.map(c => c.close);
             const bb = TechnicalIndicators.BollingerBands(closes, 20, 2);
-            ctx.strokeStyle = 'rgba(33, 150, 243, 0.4)';
-            ctx.fillStyle = 'rgba(33, 150, 243, 0.05)';
+            ctx.strokeStyle = 'rgba(33, 150, 243, 0.5)';
+            ctx.lineWidth = 1;
             ctx.beginPath();
-            
-            // Upper & Lower Band
             visibleData.forEach((c, idx) => {
                 const dataIdx = startIdx + idx;
                 const x = idx * (this.candleWidth + this.candleSpacing) + this.candleWidth/2;
@@ -166,7 +161,7 @@ class ChartEngine {
             ctx.stroke();
         }
 
-        // 3. Draw Candles / Chart Type
+        // 3. Candles / Line
         visibleData.forEach((c, idx) => {
             const x = idx * (this.candleWidth + this.candleSpacing) + this.candleWidth/2;
             const openY = priceToY(c.open);
@@ -184,24 +179,38 @@ class ChartEngine {
                 if (idx > 0) ctx.lineTo(x, closeY);
                 if (idx === visibleData.length - 1) { ctx.strokeStyle = '#2196f3'; ctx.lineWidth = 2; ctx.stroke(); }
             } else {
-                // Wick
                 ctx.lineWidth = 1;
                 ctx.beginPath(); ctx.moveTo(x, highY); ctx.lineTo(x, lowY); ctx.stroke();
 
-                // Body
                 const bodyTop = Math.min(openY, closeY);
                 const bodyH = Math.max(Math.abs(closeY - openY), 1);
                 ctx.fillRect(x - this.candleWidth/2, bodyTop, this.candleWidth, bodyH);
             }
         });
 
-        // 4. Render Volume Canvas
+        // 4. Draw Pattern Badges
+        this.patternsToDraw.forEach(p => {
+            const dataIdx = p.index;
+            if (dataIdx >= startIdx && dataIdx < endIdx) {
+                const idx = dataIdx - startIdx;
+                const x = idx * (this.candleWidth + this.candleSpacing) + this.candleWidth/2;
+                const c = this.data[dataIdx];
+                const y = p.signal === 'bullish' ? priceToY(c.low) + 15 : priceToY(c.high) - 15;
+
+                ctx.fillStyle = p.signal === 'bullish' ? '#00c853' : '#ff1744';
+                ctx.font = 'bold 9px JetBrains Mono';
+                ctx.textAlign = 'center';
+                ctx.fillText(p.name, x, y);
+            }
+        });
+
+        // 5. Volume Bar Canvas
         this.renderVolume(visibleData);
 
-        // 5. Price Scale (Right Side)
+        // 6. Right Price Scale
         this.renderPriceScale(minPrice, maxPrice);
 
-        // 6. Crosshair & Price Tag
+        // 7. Crosshair
         if (this.crosshair.visible && this.crosshair.x <= w) {
             ctx.strokeStyle = 'rgba(255,255,255,0.3)';
             ctx.setLineDash([4, 4]);
@@ -209,7 +218,6 @@ class ChartEngine {
             ctx.beginPath(); ctx.moveTo(0, this.crosshair.y); ctx.lineTo(w, this.crosshair.y); ctx.stroke();
             ctx.setLineDash([]);
 
-            // Price Tag
             const hoverPrice = maxPrice - ((this.crosshair.y - 20) / (h - 40)) * range;
             ctx.fillStyle = '#2196f3';
             ctx.fillRect(w, this.crosshair.y - 10, 70, 20);
@@ -218,7 +226,7 @@ class ChartEngine {
             ctx.fillText(hoverPrice.toFixed(2), w + 10, this.crosshair.y + 4);
         }
 
-        // Current Price Line
+        // Current Price Line Tag
         const lastC = visibleData[visibleData.length - 1];
         if (lastC) {
             const lastY = priceToY(lastC.close);

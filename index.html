@@ -19,7 +19,7 @@
             </div>
             <div class="splash-loader">
                 <div class="loader-bar"><div class="loader-fill"></div></div>
-                <span class="loader-text">Loading Institutional Engines & Greeks...</span>
+                <span class="loader-text">Loading Institutional Engines & Equities...</span>
             </div>
         </div>
     </div>
@@ -32,7 +32,7 @@
             <div class="nav-left">
                 <div class="logo"><i class="fas fa-chart-line"></i><span>ProChart<sup>™</sup></span></div>
                 <div class="symbol-selector">
-                    <button id="symbolBtn" class="symbol-btn">
+                    <button id="symbolBtn" class="symbol-btn" title="Search Stocks & Indices">
                         <span class="symbol-name">NIFTY 50</span>
                         <span class="symbol-price up" id="currentPrice">22,456.80</span>
                         <span class="symbol-change up" id="priceChange">+1.24%</span>
@@ -61,11 +61,9 @@
             <div class="nav-right">
                 <button class="nav-btn" id="indicatorBtn"><i class="fas fa-wave-square"></i><span>Indicators</span></button>
                 <button class="nav-btn" id="patternBtn"><i class="fas fa-searchengin"></i><span>Patterns</span></button>
-                <button class="nav-btn" id="alertBtn"><i class="fas fa-bell"></i><span>Alerts</span></button>
                 <div class="nav-divider"></div>
-                <button class="nav-btn icon-only" id="settingsBtn"><i class="fas fa-cog"></i></button>
-                <button class="nav-btn icon-only" id="fullscreenBtn"><i class="fas fa-expand"></i></button>
-                <button class="nav-btn icon-only" id="themeToggle"><i class="fas fa-moon"></i></button>
+                <button class="nav-btn icon-only" id="fullscreenBtn" title="Fullscreen"><i class="fas fa-expand"></i></button>
+                <button class="nav-btn icon-only" id="themeToggle" title="Toggle Theme"><i class="fas fa-moon"></i></button>
             </div>
         </nav>
 
@@ -79,15 +77,11 @@
                     <button class="tool-btn" data-tool="horizontal" title="Horizontal Line"><i class="fas fa-minus"></i></button>
                     <button class="tool-btn" data-tool="fib" title="Fibonacci"><i class="fas fa-percentage"></i></button>
                 </div>
-                <div class="tool-group" style="margin-top:auto;">
-                    <button class="tool-btn" id="deleteDrawings" title="Delete Drawings"><i class="fas fa-trash"></i></button>
-                </div>
             </div>
 
             <!-- CHART AREA -->
             <div class="chart-wrapper">
                 <div class="indicator-labels" id="indicatorLabels"></div>
-                <div class="pattern-alert-bar" id="patternAlertBar"></div>
                 
                 <canvas id="mainChart"></canvas>
                 <canvas id="volumeChart"></canvas>
@@ -102,17 +96,16 @@
 
                 <div class="price-scale" id="priceScale"></div>
                 <div class="time-scale" id="timeScale"></div>
-                <div class="pattern-overlay" id="patternOverlay"></div>
             </div>
 
             <!-- RIGHT ANALYTICS PANEL -->
             <div class="right-panel" id="rightPanel">
                 
                 <!-- MASTER PRO DASHBOARD -->
-                <div class="panel-section" id="masterProPanel">
+                <div class="panel-section">
                     <div class="panel-header">
                         <h3><i class="fas fa-crown" style="color:#ffd740"></i> Master Pro Dashboard</h3>
-                        <span class="badge" id="psychologyStatus" style="background:#00c853; font-size:9px;">Active</span>
+                        <span class="badge" id="psychologyStatus" style="background:#00c853; font-size:9px; color:#000; padding:2px 6px; border-radius:3px; font-weight:bold;">Active</span>
                     </div>
                     <div class="panel-body">
                         <div class="pro-card">
@@ -129,16 +122,12 @@
                             <div class="card-title">MACD HISTOGRAM DECELERATION</div>
                             <div id="macdDecelText" class="card-val" style="color:var(--accent-orange);">Tracking...</div>
                         </div>
-                        <div class="pro-card">
-                            <div class="card-title">3-CANDLE STAR PATTERN (50% RULE)</div>
-                            <div id="starPatternText" class="card-val" style="color:var(--text-primary);">No Pattern</div>
-                        </div>
                         <button id="simulateSLHitBtn" class="danger-btn">🚨 Register SL Hit (Circuit Breaker)</button>
                     </div>
                 </div>
 
                 <!-- OPTIONS GREEKS PANEL -->
-                <div class="panel-section" id="greeksPanel">
+                <div class="panel-section">
                     <div class="panel-header">
                         <h3><i class="fas fa-atom" style="color:#2196f3"></i> Options Greeks</h3>
                     </div>
@@ -153,35 +142,30 @@
                             <div class="greek-card delta">
                                 <div class="greek-symbol">Δ</div><div class="greek-name">Delta</div>
                                 <div class="greek-value" id="gDelta">0.55</div>
-                                <div class="greek-interp" id="gDeltaInterp">ATM Zone</div>
                             </div>
                             <div class="greek-card gamma">
                                 <div class="greek-symbol">Γ</div><div class="greek-name">Gamma</div>
                                 <div class="greek-value" id="gGamma">0.045</div>
-                                <div class="greek-interp" id="gGammaInterp">Moderate</div>
                             </div>
                             <div class="greek-card theta">
                                 <div class="greek-symbol">Θ</div><div class="greek-name">Theta</div>
                                 <div class="greek-value" id="gTheta">-12.5</div>
-                                <div class="greek-interp" id="gThetaInterp">Normal</div>
                             </div>
                             <div class="greek-card vega">
                                 <div class="greek-symbol">ν</div><div class="greek-name">Vega</div>
                                 <div class="greek-value" id="gVega">14.2</div>
-                                <div class="greek-interp" id="gVegaInterp">IV Impact</div>
                             </div>
                         </div>
 
                         <div class="combo-signal">
-                            <div class="combo-header"><span>🎯 Indicator + Greeks Combo</span><span class="combo-score" id="comboScore">75%</span></div>
+                            <div class="combo-header"><span>🎯 Combo Score</span><span class="combo-score" id="comboScore">75%</span></div>
                             <div class="combo-verdict" id="comboVerdict">🟢 BUY</div>
-                            <div class="combo-details" id="comboDetails"></div>
                         </div>
                     </div>
                 </div>
 
-                <!-- BREAKOUT CHECKLIST (IMAGE 4) -->
-                <div class="panel-section" id="breakoutChecklistPanel">
+                <!-- BREAKOUT CHECKLIST -->
+                <div class="panel-section">
                     <div class="panel-header">
                         <h3><i class="fas fa-tasks"></i> 6-Point Breakout Checklist</h3>
                     </div>
@@ -190,52 +174,13 @@
                     </div>
                 </div>
 
-                <!-- VCP & CLOSING TRAP -->
-                <div class="panel-section" id="vcpClosingPanel">
+                <!-- PATTERN RESULTS -->
+                <div class="panel-section">
                     <div class="panel-header">
-                        <h3><i class="fas fa-chart-line"></i> VCP & 3:25 PM Closing Trap</h3>
+                        <h3><i class="fas fa-searchengin"></i> AI Pattern Scanner</h3>
                     </div>
                     <div class="panel-body">
-                        <div class="pro-card">
-                            <div class="card-title">MINERVINI VCP PATTERN</div>
-                            <div id="vcpStatusText" class="card-val" style="color:var(--bull-color);">Scanning VCP...</div>
-                            <div id="vcpDetailText" class="card-sub">-</div>
-                        </div>
-                        <div class="pro-card">
-                            <div class="card-title">3:25 PM CLOSING TRAP (BTST)</div>
-                            <div id="btstSignalText" class="card-val" style="color:var(--accent-gold);">Analyzing Closing...</div>
-                            <div id="btstDetailText" class="card-sub">-</div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- RSI DIVERGENCE PANEL -->
-                <div class="panel-section" id="divergencePanel">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-exchange-alt"></i> RSI Divergence Scanner</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="pattern-results" id="divergenceResults"></div>
-                    </div>
-                </div>
-
-                <!-- CANDLE PATTERN SCANNER -->
-                <div class="panel-section" id="patternPanel">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-searchengin"></i> AI Pattern Scanner (60+)</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="pattern-results" id="patternResults"></div>
-                    </div>
-                </div>
-
-                <!-- WATCHLIST -->
-                <div class="panel-section" id="watchlistPanel">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-eye"></i> Watchlist</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="watchlist" id="watchlist"></div>
+                        <div class="pattern-results" id="patternResults">Click 'Patterns' in top bar to scan</div>
                     </div>
                 </div>
 
@@ -245,15 +190,28 @@
         <!-- STATUS BAR -->
         <div class="status-bar">
             <div class="sb-left">
-                <span class="sb-item"><i class="fas fa-circle" style="color:#00c853;font-size:8px"></i> Live</span>
+                <span class="sb-item"><i class="fas fa-circle" style="color:#00c853;font-size:8px"></i> Live Ticks</span>
                 <span class="sb-item" id="sbTime"></span>
-            </div>
-            <div class="sb-center">
-                <span class="sb-item" id="sbSignal">Signal: Neutral</span>
             </div>
             <div class="sb-right">
                 <span class="sb-item">Pro Engine v8.0</span>
-                <span class="sb-item" id="sbFPS">60 FPS</span>
+            </div>
+        </div>
+
+        <!-- SEARCH SYMBOL MODAL -->
+        <div class="modal-overlay" id="symbolModal" style="display:none;">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2><i class="fas fa-search"></i> Search Stocks & Indices</h2>
+                    <button class="modal-close" id="closeSymbolModal"><i class="fas fa-times"></i></button>
+                </div>
+                <div class="modal-body">
+                    <div class="search-input-wrapper">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="symbolSearchInput" placeholder="Search Nifty, Reliance, HDFC, TCS...">
+                    </div>
+                    <div id="symbolList" class="modal-list"></div>
+                </div>
             </div>
         </div>
 
@@ -265,24 +223,11 @@
                     <button class="modal-close" id="closeIndicatorModal"><i class="fas fa-times"></i></button>
                 </div>
                 <div class="modal-body">
-                    <div class="indicator-search">
+                    <div class="search-input-wrapper">
                         <i class="fas fa-search"></i>
-                        <input type="text" id="indicatorSearch" placeholder="Search indicators...">
+                        <input type="text" id="indicatorSearchInput" placeholder="Search EMA, VWAP, Bollinger, RSI, MACD...">
                     </div>
-                    <div class="indicator-list" id="indicatorList"></div>
-                </div>
-            </div>
-        </div>
-
-        <!-- SYMBOL MODAL -->
-        <div class="modal-overlay" id="symbolModal" style="display:none;">
-            <div class="modal">
-                <div class="modal-header">
-                    <h2><i class="fas fa-search"></i> Symbol Search</h2>
-                    <button class="modal-close" id="closeSymbolModal"><i class="fas fa-times"></i></button>
-                </div>
-                <div class="modal-body">
-                    <div class="symbol-list" id="symbolList"></div>
+                    <div id="indicatorList" class="modal-list"></div>
                 </div>
             </div>
         </div>
@@ -291,7 +236,7 @@
         <div class="toast-container" id="toastContainer"></div>
     </div>
 
-    <!-- JAVASCRIPT ENGINES LOAD -->
+    <!-- JAVASCRIPT FILES -->
     <script src="js/candlePatterns.js"></script>
     <script src="js/indicators.js"></script>
     <script src="js/greeksEngine.js"></script>

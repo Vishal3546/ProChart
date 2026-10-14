@@ -20,3 +20,16 @@ yarn-error.log*
 
 # Node dependencies (if any added in future)
 node_modules/
+
+# Environment and sensitive credentials
+.env
+.env.*
+!.env.example
+
+# Python cache & logs
+__pycache__/
+*.py[cod]
+*$py.class
+logs/
+*.log
+
