@@ -82,7 +82,7 @@ class TVBridge {
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
         });
         this.chart.priceScale('right').applyOptions({
-            scaleMargins: { top: 0.05, bottom: 0.50 },
+            scaleMargins: { top: 0.02, bottom: 0.52 },
             borderColor: '#2b2b43',
             autoScale: true,
         });
@@ -93,7 +93,7 @@ class TVBridge {
             priceScaleId: 'vol',
         });
         this.chart.priceScale('vol').applyOptions({
-            scaleMargins: { top: 0.72, bottom: 0.35 },
+            scaleMargins: { top: 0.78, bottom: 0.0 },
             visible: false,
         });
 
@@ -103,7 +103,7 @@ class TVBridge {
             priceScaleId: 'rsi',
         });
         this.chart.priceScale('rsi').applyOptions({
-            scaleMargins: { top: 0.68, bottom: 0.18 },
+            scaleMargins: { top: 0.72, bottom: 0.12 },
             visible: true,
             borderColor: '#2b2b43',
         });
@@ -222,7 +222,7 @@ class TVBridge {
 
         try {
             this.chart.priceScale('macd').applyOptions({
-                scaleMargins: { top: 0.82, bottom: 0.02 },
+                scaleMargins: { top: 0.88, bottom: 0.00 },
                 visible: true, borderColor: '#2b2b43',
             });
         } catch (e) {}
