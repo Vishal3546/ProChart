@@ -24,7 +24,7 @@ try:
     try:
         from SmartApi.smartConnect import SmartConnect
     except ImportError:
-        from smartapi.smartConnect import SmartConnect
+        from SmartApi.smartConnect import SmartConnect
 except ImportError:
     SmartConnect = None
 
