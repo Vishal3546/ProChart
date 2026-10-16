@@ -36,7 +36,7 @@ try:
     try:
         from SmartApi.smartConnect import SmartConnect  # canonical (1.5.5)
     except ImportError:
-        from smartapi.smartConnect import SmartConnect  # older / flat wheels
+        from SmartApi.smartConnect import SmartConnect  # older / flat wheels
 except ImportError:
     SmartConnect = None
 
