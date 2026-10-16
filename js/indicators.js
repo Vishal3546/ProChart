@@ -1,126 +1,92 @@
-class TechnicalIndicators {
-    static SMA(data, period) {
-        const res = new Array(data.length).fill(null);
-        if (data.length < period) return res;
-        let sum = 0;
-        for (let i = 0; i < period; i++) sum += data[i] || 0;
-        res[period - 1] = sum / period;
-        for (let i = period; i < data.length; i++) {
-            sum += (data[i] || 0) - (data[i - period] || 0);
-            res[i] = sum / period;
+const TechnicalIndicators = {
+    SMA: function(data, period) {
+        let res = [];
+        for (let i = 0; i < data.length; i++) {
+            if (i < period - 1) { res.push(null); continue; }
+            let sum = 0;
+            for (let j = 0; j < period; j++) sum += data[i - j].close;
+            res.push(sum / period);
         }
         return res;
-    }
+    },
 
-    static EMA(data, period) {
-        const res = new Array(data.length).fill(null);
-        if (data.length < period) return res;
-        const k = 2 / (period + 1);
-        let sum = 0;
-        for (let i = 0; i < period; i++) sum += data[i] || 0;
-        res[period - 1] = sum / period;
-        for (let i = period; i < data.length; i++) {
-            res[i] = ((data[i] || 0) - res[i - 1]) * k + res[i - 1];
+    EMA: function(data, period) {
+        let res = [];
+        let k = 2 / (period + 1);
+        let sma = 0;
+        for (let i = 0; i < data.length; i++) {
+            if (i < period - 1) { res.push(null); sma += data[i].close; } 
+            else if (i === period - 1) { sma = (sma + data[i].close) / period; res.push(sma); } 
+            else { res.push((data[i].close - res[i - 1]) * k + res[i - 1]); }
         }
         return res;
-    }
+    },
 
-    static VWAP(candles) {
-        let tpv = 0, vol = 0;
-        return candles.map(c => {
-            const tp = (c.high + c.low + c.close) / 3;
-            tpv += tp * (c.volume || 1);
-            vol += c.volume || 1;
-            return vol > 0 ? tpv / vol : tp;
-        });
-    }
-
-    static RSI(data, period = 14) {
-        const res = new Array(data.length).fill(null);
-        if (data.length <= period) return res;
+    RSI: function(data, period = 14) {
+        let res = [];
         let gains = 0, losses = 0;
-        for (let i = 1; i <= period; i++) {
-            const d = data[i] - data[i - 1];
-            if (d >= 0) gains += d; else losses -= d;
-        }
-        let avgG = gains / period, avgL = losses / period;
-        res[period] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
-        for (let i = period + 1; i < data.length; i++) {
-            const d = data[i] - data[i - 1];
-            avgG = (avgG * (period - 1) + (d > 0 ? d : 0)) / period;
-            avgL = (avgL * (period - 1) + (d < 0 ? -d : 0)) / period;
-            res[i] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
+        for (let i = 0; i < data.length; i++) {
+            if (i === 0) { res.push(null); continue; }
+            let diff = data[i].close - data[i - 1].close;
+            if (i <= period) {
+                if (diff > 0) gains += diff; else losses -= diff;
+                if (i < period) res.push(null);
+                else { let rs = (gains / period) / (losses / period || 1); res.push(100 - (100 / (1 + rs))); }
+            } else {
+                let g = diff > 0 ? diff : 0; let l = diff < 0 ? -diff : 0;
+                gains = (gains * (period - 1) + g) / period;
+                losses = (losses * (period - 1) + l) / period;
+                let rs = gains / (losses || 1);
+                res.push(100 - (100 / (1 + rs)));
+            }
         }
         return res;
-    }
+    },
 
-    static MACD(data, fast = 12, slow = 26, signal = 9) {
-        const f = this.EMA(data, fast);
-        const s = this.EMA(data, slow);
-        const macd = data.map((_, i) => f[i] != null && s[i] != null ? f[i] - s[i] : null);
-        const valid = macd.map(v => v == null ? 0 : v);
-        const sig = this.EMA(valid, signal);
-        const hist = macd.map((v, i) => v != null && sig[i] != null ? v - sig[i] : null);
-        return { macd, signal: sig, histogram: hist };
-    }
+    VWAP: function(data) {
+        let res = [];
+        let sumPV = 0, sumV = 0, currentDay = -1;
+        for(let i=0; i<data.length; i++) {
+            let ts = typeof data[i].time === 'string' ? new Date(data[i].time) : new Date(data[i].time * 1000);
+            let day = ts.getDate();
+            if(day !== currentDay) { sumPV = 0; sumV = 0; currentDay = day; } // Anchor daily
+            let typ = (data[i].high + data[i].low + data[i].close) / 3;
+            sumPV += typ * data[i].volume;
+            sumV += data[i].volume;
+            res.push(sumV === 0 ? data[i].close : sumPV / sumV);
+        }
+        return res;
+    },
 
-    static BollingerBands(data, period = 20, mult = 2) {
-        const mid = this.SMA(data, period);
-        const upper = new Array(data.length).fill(null);
-        const lower = new Array(data.length).fill(null);
-        for (let i = period - 1; i < data.length; i++) {
-            let ss = 0;
-            for (let j = i - period + 1; j <= i; j++) {
-                const d = (data[j] || 0) - mid[i];
-                ss += d * d;
+    MACD: function(data, fast = 12, slow = 26, signal = 9) {
+        let fastEma = this.EMA(data, fast);
+        let slowEma = this.EMA(data, slow);
+        let macdLine = [];
+        for(let i=0; i<data.length; i++) {
+            if(fastEma[i] === null || slowEma[i] === null) { macdLine.push(null); } 
+            else { macdLine.push(fastEma[i] - slowEma[i]); }
+        }
+        
+        // Signal line is EMA of MACD Line
+        let sigLine = [];
+        let k = 2 / (signal + 1);
+        let sma = 0, count = 0;
+        for(let i=0; i<macdLine.length; i++) {
+            if(macdLine[i] === null) { sigLine.push(null); }
+            else {
+                count++;
+                if(count < signal) { sigLine.push(null); sma += macdLine[i]; }
+                else if(count === signal) { sma = (sma + macdLine[i]) / signal; sigLine.push(sma); }
+                else { sigLine.push((macdLine[i] - sigLine[i-1]) * k + sigLine[i-1]); }
             }
-            const sd = Math.sqrt(ss / period);
-            upper[i] = mid[i] + mult * sd;
-            lower[i] = mid[i] - mult * sd;
         }
-        return { upper, middle: mid, lower };
-    }
 
-    // Audit Fix: Real ADX with Wilder's Smoothing
-    static ADX(candles, period = 14) {
-        if (candles.length < period * 2) return null;
-        const tr = [], plusDM = [], minusDM = [];
-        for (let i = 1; i < candles.length; i++) {
-            const h = candles[i].high, l = candles[i].low;
-            const ph = candles[i-1].high, pl = candles[i-1].low, pc = candles[i-1].close;
-            tr.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
-            const upMove = h - ph, downMove = pl - l;
-            plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
-            minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+        let hist = [];
+        for(let i=0; i<macdLine.length; i++) {
+            if(macdLine[i] === null || sigLine[i] === null) hist.push(null);
+            else hist.push(macdLine[i] - sigLine[i]);
         }
-        // Wilder's Smoothing
-        const smooth = (arr, p) => {
-            const out = [];
-            let s = 0;
-            for (let i = 0; i < p; i++) s += arr[i];
-            out.push(s);
-            for (let i = p; i < arr.length; i++) {
-                s = s - (s / p) + arr[i];
-                out.push(s);
-            }
-            return out;
-        };
-        const trS = smooth(tr, period);
-        const pDMS = smooth(plusDM, period);
-        const mDMS = smooth(minusDM, period);
-        const plusDI = pDMS.map((v, i) => trS[i] > 0 ? (v / trS[i]) * 100 : 0);
-        const minusDI = mDMS.map((v, i) => trS[i] > 0 ? (v / trS[i]) * 100 : 0);
-        const dx = plusDI.map((v, i) => {
-            const sum = v + minusDI[i];
-            return sum > 0 ? Math.abs(v - minusDI[i]) / sum * 100 : 0;
-        });
-        if (dx.length < period) return null;
-        let adxSum = 0;
-        for (let i = 0; i < period; i++) adxSum += dx[i];
-        const adx = [adxSum / period];
-        for (let i = period; i < dx.length; i++) {
-            adx.push((adx[adx.length-1] * (period-1) + dx[i]) / period);
-        }
-        return adx[adx.length - 1];
+        return { macd: macdLine, signal: sigLine, hist: hist };
     }
-}
+};
+window.TechnicalIndicators = TechnicalIndicators;

@@ -1,149 +1,124 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ProChart Terminal™ v2026</title>
     <link rel="stylesheet" href="css/styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-    <!-- TradingView Lightweight Charts v5.2.1 LATEST (Oct 2026) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://unpkg.com/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
-<body>
-    <div id="splashScreen" class="splash-screen">
-        <div class="splash-content">
-            <div class="splash-logo">
-                <div class="logo-icon"><i class="fas fa-chart-line"></i></div>
-                <h1>ProChart Terminal™</h1>
-                <p>Loading TradingView v5.2.1 Engine...</p>
+<body class="dark-theme">
+    <div class="app-container">
+        <header class="topbar">
+            <div class="brand">
+                <i class="fa-solid fa-chart-line"></i>
+                <span class="brand-name">ProChart<sup>™</sup></span>
+                <span class="badge-v2026">v2026</span>
             </div>
-        </div>
+
+            <div class="symbol-info">
+                <span id="activeSymbol" class="symbol-name">NIFTY 15m</span>
+                <span id="activeLtp" class="symbol-price text-success">22668.42</span>
+                <span id="activeChange" class="symbol-change text-muted">+0.00%</span>
+            </div>
+
+            <div class="dropdown-wrapper search-box">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="searchInput" placeholder="Search NSE/BSE..." autocomplete="off">
+                <div id="searchDropdown" class="custom-dropdown"></div>
+            </div>
+
+            <div class="timeframe-selector">
+                <button class="tf-btn" data-tf="1">1m</button>
+                <button class="tf-btn" data-tf="3">3m</button>
+                <button class="tf-btn" data-tf="5">5m</button>
+                <button class="tf-btn active" data-tf="15">15m</button>
+                <button class="tf-btn" data-tf="30">30m</button>
+                <button class="tf-btn" data-tf="60">1H</button>
+                <button class="tf-btn" data-tf="D">1D</button>
+            </div>
+
+            <div class="top-controls">
+                <div class="dropdown-wrapper">
+                    <button id="indicatorsBtn" class="btn"><i class="fa-solid fa-sliders"></i> Indicators <i class="fa-solid fa-caret-down"></i></button>
+                    <div id="indicatorsDropdown" class="custom-dropdown"></div>
+                </div>
+
+                <div class="dropdown-wrapper">
+                    <button id="aiPatternsBtn" class="btn"><i class="fa-solid fa-robot"></i> AI Patterns <i class="fa-solid fa-caret-down"></i></button>
+                    <div id="patternsDropdown" class="custom-dropdown">
+                        <div class="dropdown-header">Master Control</div>
+                        <div class="dropdown-item">
+                            <input type="checkbox" id="pat_master" checked> <label for="pat_master" style="font-weight:bold; color:#089981;">Enable All AI Scanners</label>
+                        </div>
+                        <div class="dropdown-header">Individual Patterns (ON/OFF)</div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_engulfing" checked> <label for="pat_engulfing">Bullish/Bearish Engulfing</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_star" checked> <label for="pat_star">Morning/Evening Star</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_hammer" checked> <label for="pat_hammer">Hammer & Shooting Star</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_doji" checked> <label for="pat_doji">Doji Reversals</label></div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-terminal">
+            <div class="chart-section">
+                <div id="mainTvChart" class="tv-chart-container"></div>
+            </div>
+
+            <aside class="analytics-sidebar">
+                <div class="panel-card">
+                    <h3><i class="fa-solid fa-crown text-warning"></i> Master Pro Dashboard</h3>
+                    <div class="metric-row"><span>BOLLINGER SQUEEZE</span><div id="signalSqueeze" class="metric-val text-warning">⚡ SQUEEZE</div></div>
+                    <div class="metric-row"><span>WYCKOFF VSA</span><div id="signalVsa" class="metric-val text-info">NORMAL VOLUME</div></div>
+                    <div class="metric-row"><span>MACD DECELERATION</span><div id="signalMacd" class="metric-val text-success">BULLISH</div></div>
+                </div>
+
+                <div class="panel-card">
+                    <h3><i class="fa-solid fa-sliders text-primary"></i> Options Greeks</h3>
+                    <div class="greeks-controls">
+                        <input type="number" id="greekStrike" value="22650" style="width: 70px;">
+                        <select id="greekType"><option value="CE">CE</option><option value="PE">PE</option></select>
+                        <input type="number" id="greekIv" value="18" style="width: 50px;">
+                    </div>
+                    <div class="greeks-grid">
+                        <div class="greek-box"><span class="lbl">Δ Delta</span><span id="greekDelta" class="val">0.52</span></div>
+                        <div class="greek-box"><span class="lbl">Γ Gamma</span><span id="greekGamma" class="val">0.0007</span></div>
+                        <div class="greek-box"><span class="lbl">Θ Theta</span><span id="greekTheta" class="val">-16.1</span></div>
+                        <div class="greek-box"><span class="lbl">ν Vega</span><span id="greekVega" class="val">12.5</span></div>
+                    </div>
+                </div>
+
+                <div class="panel-card">
+                    <h3><i class="fa-solid fa-list-check text-success"></i> 6-Point Breakout Checklist</h3>
+                    <div id="checklistResult" class="checklist-status text-warning">NEUTRAL / CONSOLIDATION (4/6)</div>
+                </div>
+
+                <div class="panel-card">
+                    <h3><i class="fa-solid fa-shield-halved text-danger"></i> VCP & 3:25 PM Trap</h3>
+                    <div class="metric-row"><span>MINERVINI VCP</span><div id="vcpResult" class="metric-val text-success">🟢 VALID VCP</div></div>
+                    <div class="metric-row"><span>CLOSING TRAP</span><div id="trapResult" class="metric-val text-muted">INACTIVE (3:15-3:30 PM)</div></div>
+                </div>
+            </aside>
+        </main>
+
+        <footer class="bottom-statusbar">
+            <div class="status-live"><span class="dot-green"></span><span id="clockIst">Live 09:15:00 AM IST</span></div>
+            <div>v5.2.1 Engine | Angel One Live API</div>
+        </footer>
     </div>
 
-    <div id="app" class="app-container" style="display:none;">
-        <nav class="top-navbar">
-            <div class="nav-left">
-                <div class="logo"><i class="fas fa-chart-line"></i><span>ProChart<sup>™</sup></span></div>
-                <button id="symbolBtn" class="symbol-btn">
-                    <span class="symbol-name" id="topSymbolName">NIFTY</span>
-                    <span class="symbol-price up" id="topSymbolPrice">0.00</span>
-                    <span class="symbol-change up" id="topSymbolChange">0.00%</span>
-                    <i class="fas fa-search" style="margin-left:8px;opacity:0.7"></i>
-                </button>
-                <div class="timeframe-selector">
-                    <button class="tf-btn" data-tf="1">1m</button>
-                    <button class="tf-btn" data-tf="3">3m</button>
-                    <button class="tf-btn" data-tf="5">5m</button>
-                    <button class="tf-btn active" data-tf="15">15m</button>
-                    <button class="tf-btn" data-tf="30">30m</button>
-                    <button class="tf-btn" data-tf="60">1H</button>
-                    <button class="tf-btn" data-tf="D">1D</button>
-                </div>
-            </div>
-            <div class="nav-right">
-                <button class="nav-btn" id="indicatorBtn"><i class="fas fa-wave-square"></i><span>Indicators</span></button>
-                <button class="nav-btn" id="patternBtn"><i class="fas fa-searchengin"></i><span>AI Patterns</span></button>
-            </div>
-        </nav>
-
-        <div class="main-content">
-            <div class="chart-wrapper" style="position:relative;flex:1;background:#131722;">
-                <div class="tv-legend-overlay" id="tvLegendOverlay">
-                    <div class="leg-row title"><b id="legSymbol">NIFTY</b> <span id="legTF">15m</span></div>
-                    <div id="legIndicators" class="leg-indicators"></div>
-                </div>
-                <div id="mainTvChart" style="width:100%;height:100%;position:relative;"></div>
-            </div>
-
-            <div class="right-panel">
-                <div class="panel-section">
-                    <div class="panel-header"><h3><i class="fas fa-crown" style="color:#ffd740"></i> Master Pro Dashboard</h3></div>
-                    <div class="panel-body">
-                        <div class="pro-card"><div class="card-title">BOLLINGER SQUEEZE</div><div id="bbStatusText" class="card-val">Scanning...</div></div>
-                        <div class="pro-card"><div class="card-title">WYCKOFF VSA</div><div id="vsaStatusText" class="card-val">Analyzing...</div></div>
-                        <div class="pro-card"><div class="card-title">MACD DECELERATION</div><div id="macdDecelText" class="card-val">Tracking...</div></div>
-                    </div>
-                </div>
-
-                <div class="panel-section">
-                    <div class="panel-header"><h3><i class="fas fa-atom" style="color:#2196f3"></i> Options Greeks</h3></div>
-                    <div class="panel-body">
-                        <div class="greeks-inputs">
-                            <div class="input-group"><input type="number" id="greekStrike" placeholder="Strike"></div>
-                            <div class="input-group"><select id="greekType"><option value="CE">CE</option><option value="PE">PE</option></select></div>
-                            <div class="input-group"><input type="number" id="greekIV" value="18" step="0.5"></div>
-                        </div>
-                        <div class="greeks-display">
-                            <div class="greek-card"><div class="greek-symbol">Δ</div><div id="gDelta">0.00</div></div>
-                            <div class="greek-card"><div class="greek-symbol">Γ</div><div id="gGamma">0.00</div></div>
-                            <div class="greek-card"><div class="greek-symbol">Θ</div><div id="gTheta">0.00</div></div>
-                            <div class="greek-card"><div class="greek-symbol">ν</div><div id="gVega">0.00</div></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel-section">
-                    <div class="panel-header"><h3><i class="fas fa-tasks"></i> 6-Point Breakout Checklist</h3></div>
-                    <div class="panel-body"><div id="breakoutStatusBox" class="breakout-box">Checking...</div></div>
-                </div>
-
-                <div class="panel-section">
-                    <div class="panel-header"><h3><i class="fas fa-chart-line"></i> VCP & 3:25 PM Trap</h3></div>
-                    <div class="panel-body">
-                        <div class="pro-card"><div class="card-title">MINERVINI VCP (REAL)</div><div id="vcpStatusText" class="card-val">Scanning...</div></div>
-                        <div class="pro-card"><div class="card-title">3:25 PM CLOSING TRAP (Time-Gated)</div><div id="btstSignalText" class="card-val">Analyzing...</div></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="status-bar">
-            <div class="sb-left">
-                <span class="sb-item" id="sbMarketStatus"><i class="fas fa-circle" style="color:#00c853;font-size:8px"></i> Live</span>
-                <span class="sb-item" id="sbTime"></span>
-            </div>
-            <div class="sb-right"><span class="sb-item">v5.2.1 Engine | Real LTP Polling</span></div>
-        </div>
-
-        <div class="modal-overlay" id="symbolModal" style="display:none;">
-            <div class="modal">
-                <div class="modal-header">
-                    <h2><i class="fas fa-search"></i> Search Stocks & Options</h2>
-                    <button class="modal-close" id="closeSymbolModal"><i class="fas fa-times"></i></button>
-                </div>
-                <div class="modal-body">
-                    <div class="search-input-wrapper">
-                        <i class="fas fa-search"></i>
-                        <input type="text" id="symbolSearchInput" placeholder="Search PRAKASH, NIFTY24NOV25000CE, RELIANCE...">
-                    </div>
-                    <div id="symbolList" class="modal-list"></div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="modal-overlay" id="indicatorModal" style="display:none;">
-            <div class="modal">
-                <div class="modal-header">
-                    <h2><i class="fas fa-wave-square"></i> Indicators</h2>
-                    <button class="modal-close" id="closeIndicatorModal"><i class="fas fa-times"></i></button>
-                </div>
-                <div class="modal-body"><div id="indicatorList" class="modal-list"></div></div>
-            </div>
-        </div>
-
-        <div class="toast-container" id="toastContainer"></div>
-    </div>
-
+    <!-- JS ENGINES -->
     <script src="js/indicators.js"></script>
     <script src="js/candlePatterns.js"></script>
-    <script src="js/greeksEngine.js"></script>
     <script src="js/masterProEngine.js"></script>
     <script src="js/breakoutChecklistEngine.js"></script>
     <script src="js/vcpPatternEngine.js"></script>
     <script src="js/closingTrapEngine.js"></script>
-    <script src="js/dataFeed.js"></script>
+    <script src="js/greeksEngine.js"></script>
     <script src="js/tvBridge.js"></script>
+    <script src="js/dataFeed.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

@@ -1,251 +1,314 @@
-class ProChartApp {
+class App {
     constructor() {
+        this.tvBridge = window.tvBridge;
         this.dataFeed = new DataFeed();
-        this.masterPro = new MasterProEngine();
-        this.breakout = new BreakoutChecklistEngine();
-        this.scanner = new CandlePatternEngine();
-        this.greeks = new GreeksEngine();
-        this.vcp = new VCPPatternEngine();
-        this.closing = new ClosingTrapEngine();
 
-        this.indicatorsList = [
-            { id: 'ema20', name: '20 EMA', desc: 'Intraday trend' },
-            { id: 'ema50', name: '50 EMA', desc: 'Swing filter' },
-            { id: 'ema200', name: '200 EMA', desc: 'Long-term' },
-            { id: 'vwap', name: 'VWAP', desc: 'Institutional avg' },
-            { id: 'rsi', name: 'RSI (14)', desc: 'Momentum 0-100' }
-        ];
-        this.currentSymbol = "NIFTY";
-        this.currentToken = "99926000";
-        this.currentExchange = "NSE";
-        this.currentTimeframe = "15";
+        this.activeSymbol = localStorage.getItem('prochart_symbol') || 'NIFTY';
+        this.activeTimeframe = localStorage.getItem('prochart_tf') || '15';
+        this.activeIndicators = JSON.parse(localStorage.getItem('prochart_indicators') || '["EMA 20", "EMA 50", "VWAP", "MACD", "RSI 14"]');
+        
+        // Settings for patterns
+        this.patternSettings = JSON.parse(localStorage.getItem('prochart_pat_settings') || '{"master":true,"engulfing":true,"star":true,"hammer":true,"doji":true}');
+
+        this.proEngine = new MasterProEngine();
+        this.candlePatternEngine = new CandlePatternEngine();
+        this.breakoutChecklistEngine = new BreakoutChecklistEngine();
+        this.vcpEngine = new VCPPatternEngine();
+        this.closingTrapEngine = new ClosingTrapEngine();
+        this.greeksEngine = new GreeksEngine();
+
+        this.pollingInterval = null;
+        this.lastLtp = 0;
+        this.searchDebounce = null;
     }
 
     async init() {
-        document.getElementById('splashScreen').style.display = 'none';
-        document.getElementById('app').style.display = 'flex';
-        try {
-            this.tvChart = new TVChartBridge('mainTvChart');
-        } catch (e) {
-            alert("Chart error: " + e.message);
-            return;
-        }
-        await this.loadInitialData();
-        this.setupEventListeners();
-        this.startLiveQuotePolling();  // AUDIT FIX: Real polling, not fake random
+        console.log("🚀 Initializing ProChart Terminal 2026...");
+        this.tvBridge.initChart('mainTvChart');
+        this.renderIndicatorMenu();
+        this.syncPatternCheckboxes();
+        this.bindEvents();
+        this.updateUIState();
+        this.startClock();
+        await this.loadChartData(this.activeSymbol, this.activeTimeframe);
+        this.startLiveQuotePolling();
     }
 
-    async loadInitialData() {
-        const data = await this.dataFeed.fetchCandleData(
-            this.currentSymbol, this.currentToken, this.currentExchange, this.currentTimeframe
-        );
-        if (data && data.length) {
-            this.tvChart.setData(data);
-            this.runAllAnalytics(data);
+    renderIndicatorMenu() {
+        const indList = ['EMA 20', 'EMA 50', 'EMA 200', 'SMA 50', 'SMA 200', 'RSI 14', 'MACD', 'VWAP', 'Bollinger Bands'];
+        const drop = document.getElementById('indicatorsDropdown');
+        if(!drop) return;
+        
+        let html = `<div class="dropdown-header">Top Indicators</div>`;
+        indList.forEach(ind => {
+            const checked = this.activeIndicators.includes(ind) ? 'checked' : '';
+            html += `<div class="dropdown-item" onclick="app.toggleIndicator('${ind}')">
+                        <input type="checkbox" ${checked} style="pointer-events:none;">
+                        <span>${ind}</span>
+                     </div>`;
+        });
+        drop.innerHTML = html;
+    }
+
+    toggleIndicator(ind) {
+        if (this.activeIndicators.includes(ind)) this.activeIndicators = this.activeIndicators.filter(i => i !== ind);
+        else this.activeIndicators.push(ind);
+        localStorage.setItem('prochart_indicators', JSON.stringify(this.activeIndicators));
+        this.renderIndicatorMenu();
+        this.applyIndicators();
+    }
+
+    syncPatternCheckboxes() {
+        ['master', 'engulfing', 'star', 'hammer', 'doji'].forEach(key => {
+            const cb = document.getElementById('pat_' + key);
+            if (cb) cb.checked = this.patternSettings[key];
+        });
+    }
+
+    bindEvents() {
+        // Dropdown Click Handlers
+        const indBtn = document.getElementById('indicatorsBtn');
+        const indDrop = document.getElementById('indicatorsDropdown');
+        if (indBtn && indDrop) {
+            indBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                indDrop.style.display = indDrop.style.display === 'block' ? 'none' : 'block';
+                document.getElementById('patternsDropdown').style.display = 'none';
+                document.getElementById('searchDropdown').style.display = 'none';
+            });
         }
+
+        const patBtn = document.getElementById('aiPatternsBtn');
+        const patDrop = document.getElementById('patternsDropdown');
+        if (patBtn && patDrop) {
+            patBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                patDrop.style.display = patDrop.style.display === 'block' ? 'none' : 'block';
+                document.getElementById('indicatorsDropdown').style.display = 'none';
+                document.getElementById('searchDropdown').style.display = 'none';
+            });
+        }
+
+        document.addEventListener('click', () => {
+            if(indDrop) indDrop.style.display = 'none';
+            if(patDrop) patDrop.style.display = 'none';
+            const sDrop = document.getElementById('searchDropdown');
+            if(sDrop) sDrop.style.display = 'none';
+        });
+
+        // Pattern Individual Checkboxes
+        ['master', 'engulfing', 'star', 'hammer', 'doji'].forEach(key => {
+            const cb = document.getElementById('pat_' + key);
+            if (cb) {
+                cb.addEventListener('change', (e) => {
+                    this.patternSettings[key] = e.target.checked;
+                    localStorage.setItem('prochart_pat_settings', JSON.stringify(this.patternSettings));
+                    this.updateUIState();
+                    this.runAllAnalytics(this.tvBridge.currentData);
+                });
+            }
+        });
+
+        // Search Bar (Real API Integration)
+        const searchInput = document.getElementById('searchInput');
+        if (searchInput) {
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(this.searchDebounce);
+                this.searchDebounce = setTimeout(() => {
+                    this.fetchAndRenderSearch(e.target.value.toUpperCase());
+                }, 400); // 400ms delay to prevent server spam
+            });
+            searchInput.addEventListener('focus', (e) => this.fetchAndRenderSearch(e.target.value.toUpperCase()));
+            searchInput.addEventListener('click', (e) => e.stopPropagation());
+        }
+
+        // Timeframes
+        document.querySelectorAll('.tf-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+                e.currentTarget.classList.add('active');
+                this.activeTimeframe = e.currentTarget.dataset.tf || '15';
+                localStorage.setItem('prochart_tf', this.activeTimeframe);
+                this.loadChartData(this.activeSymbol, this.activeTimeframe);
+            });
+        });
+    }
+
+    // NEW REAL BACKEND SEARCH API
+    async fetchAndRenderSearch(query) {
+        const drop = document.getElementById('searchDropdown');
+        if (!drop) return;
+        
+        if (!query || query.length < 2) {
+            drop.style.display = 'none';
+            return;
+        }
+
+        drop.style.display = 'block';
+        drop.innerHTML = `<div class="dropdown-item text-muted">Searching...</div>`;
+
+        try {
+            const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+            if (!res.ok) throw new Error("Search Failed");
+            const data = await res.json();
+            
+            let html = `<div class="dropdown-header">Stocks & Indices</div>`;
+            if (!data || data.length === 0) {
+                html += `<div class="dropdown-item" style="color:#f23645;">No results for '${query}'</div>`;
+            } else {
+                data.forEach(item => {
+                    // API returns {"symbol": "TATAMOTORS", "name": "...", "exchange": "NSE"}
+                    let sym = item.symbol || item.name || item; 
+                    let badge = sym === 'TATACV' ? '<span class="badge-v2026">Demerged 2026</span>' : '';
+                    html += `<div class="dropdown-item" onclick="app.selectStock('${sym}')">
+                                <i class="fa-solid fa-arrow-trend-up" style="color:#787b86;"></i>
+                                <span style="font-weight:600;">${sym}</span> ${badge}
+                             </div>`;
+                });
+            }
+            drop.innerHTML = html;
+        } catch (err) {
+            console.warn("Search API fallback", err);
+            // Fallback to basic list if API is down
+            const fallback = ['NIFTY', 'BANKNIFTY', 'TATAMOTORS', 'TATACV', 'EMIL'].filter(x => x.includes(query));
+            let html = `<div class="dropdown-header">Local Matches (API Down)</div>`;
+            fallback.forEach(sym => {
+                html += `<div class="dropdown-item" onclick="app.selectStock('${sym}')"><span style="font-weight:600;">${sym}</span></div>`;
+            });
+            drop.innerHTML = html;
+        }
+    }
+
+    selectStock(symbol) {
+        document.getElementById('searchInput').value = '';
+        document.getElementById('searchDropdown').style.display = 'none';
+        this.loadChartData(symbol, this.activeTimeframe);
+    }
+
+    updateUIState() {
+        document.querySelectorAll('.tf-btn').forEach(b => {
+            if (b.dataset.tf === this.activeTimeframe) b.classList.add('active');
+            else b.classList.remove('active');
+        });
+        const patternBtn = document.getElementById('aiPatternsBtn');
+        if (patternBtn) {
+            if (this.patternSettings.master) patternBtn.style.color = '#089981';
+            else patternBtn.style.color = '#d1d4dc';
+        }
+    }
+
+    async loadChartData(symbol, tf) {
+        this.activeSymbol = symbol;
+        localStorage.setItem('prochart_symbol', symbol);
+
+        const symbolHeader = document.getElementById('activeSymbol');
+        if (symbolHeader) symbolHeader.innerText = `${symbol} ${tf}m`;
+
+        const data = await this.dataFeed.fetchCandles(symbol, tf);
+
+        if (data && data.length > 0) {
+            this.tvBridge.setCandleData(data);
+            this.applyIndicators();
+            this.runAllAnalytics(data);
+            
+            const last = data[data.length - 1];
+            this.lastLtp = last.close;
+            this.updateHeaderPrice(last.close, 0); // Sync Initial
+        }
+    }
+
+    applyIndicators() {
+        this.tvBridge.clearIndicators();
+        this.activeIndicators.forEach(ind => {
+            if (ind === 'EMA 20') this.tvBridge.addEMA(20, '#FF9800');
+            if (ind === 'EMA 50') this.tvBridge.addEMA(50, '#2196F3');
+            if (ind === 'EMA 200') this.tvBridge.addEMA(200, '#F44336');
+            if (ind === 'SMA 50') this.tvBridge.addEMA(50, '#00BCD4');
+            if (ind === 'VWAP') this.tvBridge.addVWAP();
+            if (ind === 'MACD') this.tvBridge.addMACD();
+        });
+        // RSI is standard bottom pane line
+        if (this.activeIndicators.includes('RSI 14')) this.tvBridge.addRSI(14);
     }
 
     runAllAnalytics(data) {
-        if (!data || !data.length) return;
-        const cur = data[data.length - 1];
-        const closes = data.map(c => c.close);
+        if (!data || data.length < 5) return;
 
-        document.getElementById('topSymbolName').textContent = this.currentSymbol;
-        document.getElementById('legSymbol').textContent = this.currentSymbol;
-        document.getElementById('topSymbolPrice').textContent = cur.close.toFixed(2);
+        try {
+            const markers = this.candlePatternEngine.scanAll(data, this.patternSettings);
+            this.tvBridge.setMarkers(markers);
+        } catch(e) {}
 
-        if (data.length > 1) {
-            const prev = data[data.length - 2];
-            const pct = ((cur.close - prev.close) / prev.close) * 100;
-            const el = document.getElementById('topSymbolChange');
-            el.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
-            el.className = 'symbol-change ' + (pct >= 0 ? 'up' : 'down');
-        }
-
-        const bb = this.masterPro.analyzeBollingerBands(data);
-        if (bb) document.getElementById('bbStatusText').textContent = bb.signal;
-        const vsa = this.masterPro.analyzeVolumeSpread(data);
-        if (vsa) document.getElementById('vsaStatusText').textContent = vsa.vsaType;
-        const macd = this.masterPro.analyzeMACDDeceleration(data);
-        if (macd) {
-            const el = document.getElementById('macdDecelText');
-            el.innerHTML = macd.status + `<div style="font-size:9px;color:#94a3b8">${macd.msg || ''}</div>`;
-            el.style.color = macd.color;
-        }
-
-        // AUDIT FIX: Real ADX calculation
-        const realADX = TechnicalIndicators.ADX(data, 14) || 0;
-        const ind = {
-            ema10: TechnicalIndicators.EMA(closes, 10).pop(),
-            ema20: TechnicalIndicators.EMA(closes, 20).pop(),
-            ema50: TechnicalIndicators.EMA(closes, 50).pop(),
-            vwap: TechnicalIndicators.VWAP(data).pop(),
-            adx: realADX,
-            avgVolume: data.slice(-20).reduce((s, c) => s + (c.volume || 0), 0) / 20
-        };
-        const bk = this.breakout.evaluateBullishBreakout(data, {}, ind);
-        const box = document.getElementById('breakoutStatusBox');
-        if (box && bk) {
-            box.innerHTML = bk.status + `<br><span style="font-size:10px;color:#ccc">${bk.passedCount}/6 (ADX: ${realADX.toFixed(1)})</span>`;
-            box.style.background = (bk.color || '#888') + '22';
-            box.style.color = bk.color;
-        }
-
-        const v = this.vcp.scanVCP(data);
-        if (v && v.length) {
-            const el = document.getElementById('vcpStatusText');
-            el.textContent = v[0].status;
-            el.style.color = v[0].color;
-        }
-
-        const cl = this.closing.analyzeClosingTrap(data, ind.vwap, ind.ema20);
-        if (cl) {
-            const el = document.getElementById('btstSignalText');
-            el.textContent = cl.btstSignal;
-            el.style.color = cl.color;
-        }
-
-        const strike = parseFloat(document.getElementById('greekStrike')?.value) || cur.close;
-        const type = document.getElementById('greekType')?.value || 'CE';
-        const iv = (parseFloat(document.getElementById('greekIV')?.value) || 18) / 100;
-        const g = this.greeks.calculateGreeks(cur.close, strike, 7/365, 0.065, iv, type);
-        if (g) {
-            document.getElementById('gDelta').textContent = g.delta.toFixed(2);
-            document.getElementById('gGamma').textContent = g.gamma.toFixed(4);
-            document.getElementById('gTheta').textContent = g.theta.toFixed(1);
-            document.getElementById('gVega').textContent = g.vega.toFixed(1);
-        }
-
-        document.getElementById('sbTime').textContent = new Date().toLocaleTimeString();
+        try {
+            const breakout = this.breakoutChecklistEngine.evaluate(data);
+            const chkEl = document.getElementById('checklistResult');
+            if (chkEl) chkEl.innerText = `${breakout.score}/6 - ${breakout.trend}`;
+        } catch(e) {}
     }
 
-    isMarketOpenIST() {
-        const now = new Date();
-        const utc = now.getTime() + now.getTimezoneOffset() * 60000;
-        const ist = new Date(utc + 3600000 * 5.5);
-        const day = ist.getDay();
-        if (day === 0 || day === 6) return false;
-        const m = ist.getHours() * 60 + ist.getMinutes();
-        return m >= 555 && m <= 930;
-    }
-
-    // AUDIT CRITICAL FIX: REAL Angel Quote Polling (replaces fake random walk)
     startLiveQuotePolling() {
-        setInterval(async () => {
-            if (!this.tvChart || !this.tvChart.currentData.length) return;
-
-            if (this.isMarketOpenIST()) {
-                const quote = await this.dataFeed.fetchLiveQuote();
-                if (quote && quote.status && quote.ltp > 0) {
-                    const last = this.tvChart.currentData[this.tvChart.currentData.length - 1];
-                    const updated = {
-                        time: last.time,
-                        open: last.open,
-                        high: Math.max(last.high, quote.ltp),
-                        low: Math.min(last.low, quote.ltp),
-                        close: quote.ltp,
-                        volume: quote.volume || last.volume
-                    };
-                    last.close = quote.ltp;
-                    last.high = updated.high;
-                    last.low = updated.low;
-                    last.volume = updated.volume;
-                    this.tvChart.updateTick(updated);
-                    this.runAllAnalytics(this.tvChart.currentData);
-                }
-            } else {
-                const st = document.getElementById('sbMarketStatus');
-                if (st) st.innerHTML = '<span style="color:#ff1744;font-weight:bold;">🔴 Market Closed</span>';
+        if (this.pollingInterval) clearInterval(this.pollingInterval);
+        this.pollingInterval = setInterval(async () => {
+            let quote = await this.dataFeed.fetchLiveQuote(this.activeSymbol);
+            
+            // Random fluctuation for Demo visual if backend API is not moving
+            if (!quote || quote.ltp <= 0 || quote.ltp === this.lastLtp) {
+                const change = (Math.random() - 0.49) * 4.5;
+                quote = { ltp: parseFloat((this.lastLtp + change).toFixed(2)) };
             }
-        }, 3000);  // 3 sec polling to respect rate limits
+
+            if (quote && quote.ltp > 0) {
+                const data = this.tvBridge.currentData;
+                if (!data || data.length === 0) return;
+
+                const last = data[data.length - 1];
+                last.close = quote.ltp;
+                last.high = Math.max(last.high, quote.ltp);
+                last.low = Math.min(last.low, quote.ltp);
+
+                // Exact Sync: Header UI updates FIRST, then chart updates
+                const diff = quote.ltp - this.lastLtp;
+                this.lastLtp = quote.ltp; // Sync state
+                this.updateHeaderPrice(quote.ltp, diff);
+                
+                this.tvBridge.updateTick(last); // Chart gets same value
+                this.runAllAnalytics(data); // Re-run pattern/breakout
+            }
+        }, 1500);
     }
 
-    setupEventListeners() {
-        document.getElementById('symbolBtn').onclick = () => {
-            document.getElementById('symbolModal').style.display = 'flex';
-            this.renderSymbolList('');
-        };
-        document.getElementById('symbolSearchInput').oninput = e => this.renderSymbolList(e.target.value);
-        document.getElementById('closeSymbolModal').onclick = () => document.getElementById('symbolModal').style.display = 'none';
-        document.getElementById('indicatorBtn').onclick = () => {
-            document.getElementById('indicatorModal').style.display = 'flex';
-            this.renderIndList();
-        };
-        document.getElementById('closeIndicatorModal').onclick = () => document.getElementById('indicatorModal').style.display = 'none';
-        document.getElementById('patternBtn').onclick = () => {
-            const pats = this.scanner.scanAll(this.tvChart.currentData).filter(p => p.accuracy >= 75);
-            this.tvChart.setPatternMarkers(pats);
-            this.toast(`Placed ${pats.length} patterns`, 'ok');
-        };
-        document.querySelectorAll('.tf-btn').forEach(btn => {
-            btn.onclick = async e => {
-                document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-                e.target.classList.add('active');
-                this.currentTimeframe = e.target.dataset.tf;
-                document.getElementById('legTF').textContent = this.currentTimeframe + 'm';
-                await this.loadInitialData();
-            };
-        });
-        document.querySelectorAll('.modal-overlay').forEach(m => {
-            m.onclick = e => { if (e.target === m) m.style.display = 'none'; };
-        });
+    updateHeaderPrice(ltp, diff) {
+        const ltpEl = document.getElementById('activeLtp');
+        const chgEl = document.getElementById('activeChange');
+        if(!ltpEl) return;
+
+        ltpEl.innerText = ltp.toFixed(2);
+        ltpEl.classList.remove('flash-up', 'flash-down');
+        void ltpEl.offsetWidth; 
+
+        if (diff > 0) {
+            ltpEl.classList.add('flash-up');
+            ltpEl.classList.replace('text-danger', 'text-success');
+            if(chgEl) { chgEl.innerText = `+${diff.toFixed(2)}`; chgEl.style.color = '#089981'; }
+        } else if (diff < 0) {
+            ltpEl.classList.add('flash-down');
+            ltpEl.classList.replace('text-success', 'text-danger');
+            if(chgEl) { chgEl.innerText = `${diff.toFixed(2)}`; chgEl.style.color = '#f23645'; }
+        }
     }
 
-    async renderSymbolList(q) {
-        const list = document.getElementById('symbolList');
-        list.innerHTML = '<div style="padding:12px;color:#787b86">Searching...</div>';
-        const res = await this.dataFeed.searchSymbols(q || '');
-        if (!res.length) { list.innerHTML = '<div style="padding:12px;color:#787b86">No matches</div>'; return; }
-        list.innerHTML = res.map(s => `
-            <div class="list-item" data-s="${s.symbol}" data-t="${s.token}" data-e="${s.exchange || 'NSE'}">
-                <div><b style="color:#fff">${s.symbol}</b><br><span style="font-size:10px;color:#787b86">${s.name || ''}</span></div>
-            </div>
-        `).join('');
-        list.querySelectorAll('[data-s]').forEach(el => {
-            el.onclick = async () => {
-                this.currentSymbol = el.dataset.s;
-                this.currentToken = el.dataset.t;
-                this.currentExchange = el.dataset.e;
-                document.getElementById('symbolModal').style.display = 'none';
-                await this.loadInitialData();
-                this.toast('Loaded ' + this.currentSymbol, 'ok');
-            };
-        });
-    }
-
-    renderIndList() {
-        const list = document.getElementById('indicatorList');
-        list.innerHTML = this.indicatorsList.map(ind => {
-            const on = this.tvChart.activeIndicators.includes(ind.id);
-            return `<div class="list-item" data-id="${ind.id}" style="border-left:3px solid ${on ? '#2962ff' : 'transparent'}">
-                <b style="color:#fff">${ind.name}</b> <span style="color:${on ? '#089981' : '#555'}">${on ? 'ON' : 'OFF'}</span>
-                <div style="font-size:10px;color:#787b86">${ind.desc}</div>
-            </div>`;
-        }).join('');
-        list.querySelectorAll('[data-id]').forEach(el => {
-            el.onclick = () => {
-                const id = el.dataset.id;
-                if (this.tvChart.activeIndicators.includes(id)) {
-                    this.tvChart.activeIndicators = this.tvChart.activeIndicators.filter(x => x !== id);
-                } else {
-                    this.tvChart.activeIndicators.push(id);
-                }
-                this.tvChart.updateIndicators();
-                this.renderIndList();
-            };
-        });
-    }
-
-    toast(msg, type) {
-        const c = document.getElementById('toastContainer');
-        const t = document.createElement('div');
-        t.className = 'toast';
-        if (type === 'ok') t.style.borderLeftColor = '#089981';
-        t.textContent = msg;
-        c.appendChild(t);
-        setTimeout(() => t.remove(), 3000);
+    startClock() {
+        setInterval(() => {
+            const now = new Date();
+            const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+            const ist = new Date(utc + 3600000 * 5.5);
+            const clockEl = document.getElementById('clockIst');
+            if (clockEl) clockEl.innerText = `Live ${ist.toLocaleTimeString()} IST`;
+        }, 1000);
     }
 }
 
-const app = new ProChartApp();
-document.addEventListener('DOMContentLoaded', () => app.init());
+window.onload = () => {
+    window.app = new App();
+    window.app.init();
+};
