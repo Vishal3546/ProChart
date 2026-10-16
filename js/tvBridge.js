@@ -1,25 +1,19 @@
 /* ============================================================
- * TVBridge — Lightweight Charts v5 wrapper (v2026.10)
- * Panes: Candles + Volume | RSI | MACD
- * Indicators: SMA, EMA, Bollinger Bands, VWAP, SuperTrend
- * Timestamps: works with UNIX seconds in/out; ms inputs auto-divided.
+ * TVBridge — Lightweight Charts v5 wrapper (v2026.10 FINAL)
+ * TRUE STACKED PANES via 4 synced chart instances (no overlap).
+ * Bullet-proof approach used by TradingView Lite, Binance, Coinigy.
+ * Panes: Candles(+EMA/BB/VWAP/ST) | Volume | RSI | MACD
+ * All charts share one timeScale (crosshair + scroll zoom synced).
  * ============================================================ */
 class TVBridge {
     constructor() {
-        this.chart = null;
-        this.mainSeries = null;
-        this.volumeSeries = null;
-        this.rsiSeries = null;
-        this.vwapSeries = null;
-        this.bbUpper = null;
-        this.bbLower = null;
-        this.bbMid = null;
-        this.supertrendSeries = null;
-        this.macdFast = null;
-        this.macdSlow = null;
-        this.macdHist = null;
-        this.overlays = {};   // key: "ema20"/"sma50" → series
+        this.container = null;
+        this.charts = {};       // main, vol, rsi, macd
+        this.series = {};       // main, vol, rsi, macdHist/macdFast/macdSlow
+        this.overlays = {};     // emaX, smaX, vwap, bb*, supertrend → on main chart
         this.currentData = [];
+        this.paneEls = {};
+        this._syncing = false;
         this._resizeObserver = null;
     }
 
@@ -32,10 +26,7 @@ class TVBridge {
     }
     _fmt(data) {
         return data
-            .map(d => ({
-                time: this._toSec(d.time),
-                open: +d.open, high: +d.high, low: +d.low, close: +d.close,
-            }))
+            .map(d => ({ time: this._toSec(d.time), open: +d.open, high: +d.high, low: +d.low, close: +d.close }))
             .filter(d => d.time > 0)
             .sort((a, b) => a.time - b.time);
     }
@@ -44,208 +35,247 @@ class TVBridge {
             .map(d => ({
                 time: this._toSec(d.time),
                 value: +(d.volume || 0),
-                color: d.close >= d.open ? 'rgba(8,153,129,0.45)' : 'rgba(242,54,69,0.45)',
+                color: d.close >= d.open ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
             }))
             .filter(d => d.time > 0)
             .sort((a, b) => a.time - b.time);
+    }
+    _mapArr(values) {
+        return this.currentData.map((d, i) => ({ time: this._toSec(d.time), value: values[i] }));
+    }
+
+    // ---------- layout ----------
+    _buildLayout(container) {
+        container.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'width:100%;height:100%;display:flex;flex-direction:column;gap:0;background:#131722;';
+        container.appendChild(wrap);
+
+        const PANES = [
+            { key: 'main', flex: '4 1 0', showX: false, xAxis: false },
+            { key: 'vol',  flex: '1 1 0', showX: false, xAxis: false },
+            { key: 'rsi',  flex: '1.2 1 0', showX: false, xAxis: false },
+            { key: 'macd', flex: '1.3 1 0', showX: true,  xAxis: true  },
+        ];
+        PANES.forEach(p => {
+            const el = document.createElement('div');
+            el.style.cssText = `position:relative;flex:${p.flex};min-height:0;width:100%;border-bottom:1px solid #1f2933;`;
+            el.dataset.pane = p.key;
+            wrap.appendChild(el);
+            this.paneEls[p.key] = el;
+        });
+    }
+
+    _baseChartOpts(extra = {}) {
+        return {
+            layout: { background: { color: '#131722' }, textColor: '#d1d4dc', fontFamily: "Inter,-apple-system,sans-serif" },
+            grid: { vertLines: { color: 'transparent' }, horzLines: { color: '#1f2933', style: 1 } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: '#2b2b43', borderVisible: true, alignLabels: true },
+            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 5, visible: false },
+            handleScroll: { vertTouchDrag: false },
+            ...extra,
+        };
+    }
+
+    _makeChart(key, extra) {
+        const el = this.paneEls[key];
+        const c = LightweightCharts.createChart(el, this._baseChartOpts(extra));
+        return c;
+    }
+
+    _syncTimeScales() {
+        const keys = ['main', 'vol', 'rsi', 'macd'];
+        keys.forEach(src => {
+            const srcTS = this.charts[src].timeScale();
+            keys.forEach(dst => {
+                if (dst === src) return;
+                const dstTS = this.charts[dst].timeScale();
+                srcTS.subscribeVisibleLogicalRangeChange((range) => {
+                    if (this._syncing) return;
+                    this._syncing = true;
+                    dstTS.setVisibleLogicalRange(range, true);
+                    this._syncing = false;
+                });
+            });
+        });
+        // Sync crosshair across panes
+        keys.forEach(k => {
+            this.charts[k].subscribeCrosshairMove((param) => {
+                if (!param || !param.time) return;
+                keys.forEach(o => {
+                    if (o === k) return;
+                    this.charts[o].setCrosshairPosition(undefined, param.time, this.series.main, true);
+                });
+            });
+        });
+    }
+
+    _syncResize() {
+        const resize = () => {
+            Object.entries(this.charts).forEach(([k, c]) => {
+                const el = this.paneEls[k];
+                c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+            });
+        };
+        if (window.ResizeObserver) {
+            this._resizeObserver = new ResizeObserver(resize);
+            Object.values(this.paneEls).forEach(el => this._resizeObserver.observe(el));
+        } else {
+            window.addEventListener('resize', resize);
+        }
+        setTimeout(resize, 50);
     }
 
     // ---------- init ----------
     initChart(containerId) {
         const container = document.getElementById(containerId);
         if (!container) return;
-        container.innerHTML = '';
+        this.container = container;
+        this._buildLayout(container);
 
-        this.chart = LightweightCharts.createChart(container, {
-            layout: {
-                background: { color: '#131722' },
-                textColor: '#d1d4dc',
-                fontFamily: "Inter, -apple-system, sans-serif",
-            },
-            grid: {
-                vertLines: { color: '#1f2933', style: 1 },
-                horzLines: { color: '#1f2933', style: 1 },
-            },
-            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-            rightPriceScale: { borderColor: '#2b2b43' },
-            timeScale: {
-                timeVisible: true,
-                secondsVisible: false,
-                borderColor: '#2b2b43',
-                rightOffset: 5,
-            },
-        });
-
-        // 1) Main candlestick pane
-        // =========================================================
-        // Proper TradingView-style stacked panes (non-overlapping)
-        // Heights: Candles 47% | Volume 12% | RSI 16% | MACD 18%
-        // scaleMargins: top=%from top of chart to pane-top,
-        //               bottom=%from bottom of chart to pane-bottom.
-        // =========================================================
-
-        // 1) Main candlestick pane (top — 53% down)
-        this.mainSeries = this.chart.addSeries(LightweightCharts.CandlestickSeries, {
+        // 1) MAIN (candles + overlays)
+        this.charts.main = this._makeChart('main');
+        this.series.main = this.charts.main.addSeries(LightweightCharts.CandlestickSeries, {
             upColor: '#089981', downColor: '#f23645',
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
+        });
+
+        // 2) VOLUME
+        this.charts.vol = this._makeChart('vol');
+        this.series.vol = this.charts.vol.addSeries(LightweightCharts.HistogramSeries, {
+            priceFormat: { type: 'volume' },
             priceScaleId: 'right',
         });
-        this.chart.priceScale('right').applyOptions({
-            scaleMargins: { top: 0.05, bottom: 0.48 },
-            borderColor: '#2b2b43',
-            autoScale: true,
-            borderVisible: true,
-            alignLabels: true,
-        });
+        this.charts.vol.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
 
-        // 2) Volume pane (52% – 64% from top)
-        this.volumeSeries = this.chart.addSeries(LightweightCharts.HistogramSeries, {
-            priceFormat: { type: 'volume' },
-            priceScaleId: 'vol',
+        // 3) RSI
+        this.charts.rsi = this._makeChart('rsi');
+        this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
+            color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
         });
-        this.chart.priceScale('vol').applyOptions({
-            scaleMargins: { top: 0.52, bottom: 0.36 },
-            visible: true,
-            borderVisible: true,
-            borderColor: '#2b2b43',
-            alignLabels: false,
-        });
-
-        // 3) RSI pane (64% – 80% from top)
-        this.rsiSeries = this.chart.addSeries(LightweightCharts.LineSeries, {
-            color: '#9c27b0', lineWidth: 2,
-            priceScaleId: 'rsi',
-        });
-        this.chart.priceScale('rsi').applyOptions({
-            scaleMargins: { top: 0.64, bottom: 0.20 },
-            visible: true,
-            borderColor: '#2b2b43',
-            borderVisible: true,
-            alignLabels: true,
-        });
+        this.charts.rsi.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
         try {
-            this.rsiSeries.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
-            this.rsiSeries.createPriceLine({ price: 30, color: '#089981', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
-            this.rsiSeries.createPriceLine({ price: 50, color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: '50' });
-        } catch (e) { /* v5 API differences: ignore */ }
+            this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
+            this.series.rsi.createPriceLine({ price: 30, color: '#089981', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
+            this.series.rsi.createPriceLine({ price: 50, color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: '50' });
+        } catch (e) {}
 
-        // Resize observer so chart always fills its container
-        if (window.ResizeObserver) {
-            this._resizeObserver = new ResizeObserver(() => {
-                const rect = container.getBoundingClientRect();
-                this.chart.applyOptions({ width: rect.width, height: rect.height });
+        // 4) MACD
+        this.charts.macd = this._makeChart('macd', {
+            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 5, visible: true },
+        });
+        this.series.macdHist = this.charts.macd.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false });
+        this.series.macdFast = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'MACD' });
+        this.series.macdSlow = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#FF6D00', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'Signal' });
+        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+
+        // Disable wheel/scroll/horiz drag on sub-charts so main chart drives it
+        ['vol', 'rsi', 'macd'].forEach(k => {
+            this.charts[k].applyOptions({
+                handleScroll: { mouseWheel: false, pressedMouseMove: false, horzTouchDrag: true },
+                handleScale: { mouseWheel: false, pinch: false },
             });
-            this._resizeObserver.observe(container);
-        } else {
-            window.addEventListener('resize', () => {
-                const rect = container.getBoundingClientRect();
-                this.chart.applyOptions({ width: rect.width, height: rect.height });
-            });
-        }
+        });
+
+        this._syncTimeScales();
+        this._syncResize();
     }
 
     // ---------- data ----------
     setCandleData(data) {
-        if (!this.mainSeries || !data || !data.length) return;
+        if (!this.series.main || !data || !data.length) return;
         this.currentData = data.slice().sort((a, b) => this._toSec(a.time) - this._toSec(b.time));
         const fmt = this._fmt(this.currentData);
-        this.mainSeries.setData(fmt);
-        this.volumeSeries.setData(this._fmtVol(this.currentData));
-        this.chart.timeScale().fitContent();
+        const vFmt = this._fmtVol(this.currentData);
+        this.series.main.setData(fmt);
+        this.series.vol.setData(vFmt);
+        this.charts.main.timeScale().fitContent();
+        this.charts.vol.timeScale().fitContent();
+        this.charts.rsi.timeScale().fitContent();
+        this.charts.macd.timeScale().fitContent();
     }
 
     updateTick(candle) {
-        if (!this.mainSeries) return;
+        if (!this.series.main) return;
         const ts = this._toSec(candle.time);
-        this.mainSeries.update({ time: ts, open: +candle.open, high: +candle.high, low: +candle.low, close: +candle.close });
-        this.volumeSeries.update({
+        this.series.main.update({ time: ts, open: +candle.open, high: +candle.high, low: +candle.low, close: +candle.close });
+        this.series.vol.update({
             time: ts, value: +(candle.volume || 0),
-            color: candle.close >= candle.open ? 'rgba(8,153,129,0.45)' : 'rgba(242,54,69,0.45)',
+            color: candle.close >= candle.open ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
         });
     }
 
-    // ---------- overlays ----------
+    // ---------- overlays (all live on main chart) ----------
     _setOverlay(key, series, data) {
-        if (this.overlays[key]) {
-            try { this.chart.removeSeries(this.overlays[key]); } catch (e) {}
-        }
+        if (this.overlays[key]) { try { this.charts.main.removeSeries(this.overlays[key]); } catch (e) {} }
         this.overlays[key] = series;
         series.setData(data.filter(d => d.value !== null && d.value !== undefined).sort((a, b) => a.time - b.time));
     }
     _removeOverlay(key) {
         if (this.overlays[key]) {
-            try { this.chart.removeSeries(this.overlays[key]); } catch (e) {}
+            try { this.charts.main.removeSeries(this.overlays[key]); } catch (e) {}
             delete this.overlays[key];
         }
-    }
-    _mapArr(values) {
-        return this.currentData.map((d, i) => ({ time: this._toSec(d.time), value: values[i] }));
     }
 
     addSMA(period, color) {
         const sma = TechnicalIndicators.SMA(this.currentData, period);
-        const series = this.chart.addSeries(LightweightCharts.LineSeries, { color, lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: `SMA ${period}`, crosshairMarkerVisible: false });
+        const series = this.charts.main.addSeries(LightweightCharts.LineSeries, {
+            color, lineWidth: 1, priceLineVisible: false, lastValueVisible: true,
+            title: `SMA ${period}`, crosshairMarkerVisible: false,
+        });
         this._setOverlay(`sma${period}`, series, this._mapArr(sma));
     }
     addEMA(period, color) {
         const ema = TechnicalIndicators.EMA(this.currentData, period);
-        const series = this.chart.addSeries(LightweightCharts.LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: `EMA ${period}`, crosshairMarkerVisible: false });
+        const series = this.charts.main.addSeries(LightweightCharts.LineSeries, {
+            color, lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+            title: `EMA ${period}`, crosshairMarkerVisible: false,
+        });
         this._setOverlay(`ema${period}`, series, this._mapArr(ema));
     }
     addVWAP() {
-        if (this.vwapSeries) { try { this.chart.removeSeries(this.vwapSeries); } catch (e) {} }
+        if (this.overlays.vwap) { try { this.charts.main.removeSeries(this.overlays.vwap); } catch (e) {} }
         const vwap = TechnicalIndicators.VWAP(this.currentData);
-        this.vwapSeries = this.chart.addSeries(LightweightCharts.LineSeries, {
+        const series = this.charts.main.addSeries(LightweightCharts.LineSeries, {
             color: '#E040FB', lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
             title: 'VWAP', crosshairMarkerVisible: false, lineStyle: LightweightCharts.LineStyle.Dashed,
         });
-        this.vwapSeries.setData(this._mapArr(vwap).filter(d => d.value !== null));
+        series.setData(this._mapArr(vwap).filter(d => d.value !== null));
+        this.overlays.vwap = series;
     }
     addBollinger() {
         this.removeBollinger();
         const bb = TechnicalIndicators.BollingerBands(this.currentData, 20, 2);
-        this.bbUpper = this.chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(33,150,243,0.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: 'BB Upper' });
-        this.bbMid   = this.chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(33,150,243,0.5)', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, title: 'BB Mid', crosshairMarkerVisible: false, lineStyle: LightweightCharts.LineStyle.Dashed });
-        this.bbLower = this.chart.addSeries(LightweightCharts.LineSeries, { color: 'rgba(33,150,243,0.7)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, title: 'BB Lower' });
-        this.bbUpper.setData(this._mapArr(bb.upper).filter(d => d.value !== null));
-        this.bbMid.setData(this._mapArr(bb.middle).filter(d => d.value !== null));
-        this.bbLower.setData(this._mapArr(bb.lower).filter(d => d.value !== null));
+        const mk = (color, data, opts = {}) => {
+            const s = this.charts.main.addSeries(LightweightCharts.LineSeries, {
+                color, lineWidth: 1, priceLineVisible: false, crosshairMarkerVisible: false, ...opts,
+            });
+            s.setData(this._mapArr(data).filter(d => d.value !== null));
+            return s;
+        };
+        this.overlays.bbUpper = mk('rgba(33,150,243,0.7)', bb.upper, { lastValueVisible: false, title: 'BB Upper' });
+        this.overlays.bbMid   = mk('rgba(33,150,243,0.5)', bb.middle, { lastValueVisible: true,  title: 'BB Mid', lineStyle: LightweightCharts.LineStyle.Dashed });
+        this.overlays.bbLower = mk('rgba(33,150,243,0.7)', bb.lower, { lastValueVisible: false, title: 'BB Lower' });
     }
     removeBollinger() {
-        [this.bbUpper, this.bbMid, this.bbLower].forEach((s, idx) => {
-            if (s) { try { this.chart.removeSeries(s); } catch (e) {} }
-        });
-        this.bbUpper = this.bbMid = this.bbLower = null;
+        ['bbUpper', 'bbMid', 'bbLower'].forEach(k => this._removeOverlay(k));
     }
     addSuperTrend() {
         this.removeSuperTrend();
         const st = TechnicalIndicators.SuperTrend(this.currentData, 10, 3);
-        // Colour segments green/red by direction — lightweight-charts single-line series can't change color mid-stream, so approximate with one color & markers. Instead use one line.
-        this.supertrendSeries = this.chart.addSeries(LightweightCharts.LineSeries, { color: '#26a69a', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'SuperTrend', crosshairMarkerVisible: false });
-        this.supertrendSeries.setData(this._mapArr(st.trend).filter(d => d.value !== null));
+        const series = this.charts.main.addSeries(LightweightCharts.LineSeries, {
+            color: '#26a69a', lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+            title: 'SuperTrend', crosshairMarkerVisible: false,
+        });
+        series.setData(this._mapArr(st.trend).filter(d => d.value !== null));
+        this.overlays.supertrend = series;
     }
-    removeSuperTrend() {
-        if (this.supertrendSeries) { try { this.chart.removeSeries(this.supertrendSeries); } catch (e) {} this.supertrendSeries = null; }
-    }
+    removeSuperTrend() { this._removeOverlay('supertrend'); }
 
-    // ---------- MACD pane ----------
+    // ---------- MACD (sub-chart 4) ----------
     addMACD() {
-        this.removeMACD();
-        // Ensure macd price scale exists before configuring margins
-        this.macdHist = this.chart.addSeries(LightweightCharts.HistogramSeries, { priceScaleId: 'macd', priceLineVisible: false });
-        this.macdFast = this.chart.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: true, title: 'MACD' });
-        this.macdSlow = this.chart.addSeries(LightweightCharts.LineSeries, { color: '#FF6D00', lineWidth: 2, priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: true, title: 'Signal' });
-
-        try {
-            this.chart.priceScale('macd').applyOptions({
-                scaleMargins: { top: 0.80, bottom: 0.02 },
-                visible: true,
-                borderColor: '#2b2b43',
-                borderVisible: true,
-                alignLabels: true,
-            });
-        } catch (e) {}
-
         const macdObj = TechnicalIndicators.MACD(this.currentData);
         const histMap = [], fastMap = [], slowMap = [];
         this.currentData.forEach((d, i) => {
@@ -254,38 +284,34 @@ class TVBridge {
             if (macdObj.macd[i] != null) fastMap.push({ time: ts, value: macdObj.macd[i] });
             if (macdObj.signal[i] != null) slowMap.push({ time: ts, value: macdObj.signal[i] });
         });
-        this.macdHist.setData(histMap);
-        this.macdFast.setData(fastMap);
-        this.macdSlow.setData(slowMap);
+        this.series.macdHist.setData(histMap);
+        this.series.macdFast.setData(fastMap);
+        this.series.macdSlow.setData(slowMap);
     }
     removeMACD() {
-        [this.macdFast, this.macdSlow, this.macdHist].forEach(s => {
-            if (s) { try { this.chart.removeSeries(s); } catch (e) {} }
-        });
-        this.macdFast = this.macdSlow = this.macdHist = null;
+        // Hide data (keep series alive on its chart to avoid flicker)
+        this.series.macdHist.setData([]);
+        this.series.macdFast.setData([]);
+        this.series.macdSlow.setData([]);
     }
 
-    // ---------- RSI ----------
+    // ---------- RSI (sub-chart 3) ----------
     addRSI(period = 14) {
-        if (!this.rsiSeries) {
-            this.rsiSeries = this.chart.addSeries(LightweightCharts.LineSeries, { color: '#9c27b0', lineWidth: 2, priceScaleId: 'rsi' });
-        }
         const rsiData = TechnicalIndicators.RSI(this.currentData, period);
-        this.rsiSeries.setData(this._mapArr(rsiData).filter(d => d.value !== null));
+        this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value !== null));
     }
 
     // ---------- clear / markers ----------
     clearIndicators() {
         Object.keys(this.overlays).forEach(k => this._removeOverlay(k));
-        if (this.vwapSeries) { try { this.chart.removeSeries(this.vwapSeries); } catch (e) {} this.vwapSeries = null; }
-        this.removeBollinger();
-        this.removeSuperTrend();
         this.removeMACD();
-        // RSI is kept (pane + dashed lines); re-render when added
+        // RSI sub-chart: clear but keep dashed reference lines
+        this.series.rsi.setData([]);
+        // Volume always stays (it's on its own pane, not an "indicator")
     }
 
     setMarkers(markersData) {
-        if (!this.mainSeries || !Array.isArray(markersData)) return;
+        if (!this.series.main || !Array.isArray(markersData)) return;
         try {
             const formatted = markersData
                 .map(m => ({
@@ -295,7 +321,7 @@ class TVBridge {
                 }))
                 .filter(m => !isNaN(m.time))
                 .sort((a, b) => a.time - b.time);
-            if (typeof this.mainSeries.setMarkers === 'function') this.mainSeries.setMarkers(formatted);
+            if (typeof this.series.main.setMarkers === 'function') this.series.main.setMarkers(formatted);
         } catch (err) { console.warn('setMarkers failed', err); }
     }
 }
