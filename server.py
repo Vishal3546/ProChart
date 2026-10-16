@@ -30,9 +30,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
 
+# SmartApi SDK — try both capitalizations; graceful fallback if not installed.
+# smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
 try:
-    from SmartApi import SmartConnect
-except ImportError:  # graceful fallback if SmartApi isn't installed (still runs simulated)
+    try:
+        from SmartApi.smartConnect import SmartConnect  # canonical (1.5.5)
+    except ImportError:
+        from smartapi.smartConnect import SmartConnect  # older / flat wheels
+except ImportError:
     SmartConnect = None
 
 load_dotenv()
