@@ -1,15 +1,5 @@
 # ============================================
-# ProChart Terminal™ - Backend v2026.10 Production
-# Fixes (Oct 2026):
-#  - Bind to 127.0.0.1 only (security hardening)
-#  - CORS tightened to localhost
-#  - Static file serving so a single `uvicorn server:app` serves the UI
-#  - IST timezone aware
-#  - Lifespan API (modern FastAPI)
-#  - Angel One SmartAPI session auto-refresh (23h)
-#  - Quote + Candle endpoints with proper token/exchange routing
-#  - Scrip master download/stream/cache
-#  - Bounded candle cache (no memory leak)
+# ProChart Terminal™ - Backend v2026.10
 # ============================================
 
 import os
@@ -28,15 +18,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 
-# SmartApi SDK — try both capitalizations; graceful fallback if not installed.
-# smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
 try:
     try:
-        from SmartApi.smartConnect import SmartConnect  # canonical (1.5.5)
+        from SmartApi.smartConnect import SmartConnect
     except ImportError:
-        from smartapi.smartConnect import SmartConnect  # older / flat wheels
+        from smartapi.smartConnect import SmartConnect
 except ImportError:
     SmartConnect = None
 
@@ -97,10 +85,6 @@ def load_local_scrip_master():
             name = str(s.get("name", ""))
             token = str(s.get("token", ""))
             inst_type = s.get("instrumenttype", "")
-            opt_type = str(s.get("optiontype", ""))
-            expiry = str(s.get("expiry", ""))
-            strike = float(s.get("strike", 0) or 0)
-            lotsize = int(s.get("lotsize", 1) or 1)
 
             if exch in ("NSE", "BSE") and (sym.endswith("-EQ") or inst_type in ("AMXIDX",)):
                 scrip_master.append({
@@ -121,12 +105,8 @@ def load_local_scrip_master():
                     "token": token,
                     "exchange": exch,
                     "type": "OPT_FUT",
-                    "optiontype": opt_type,
-                    "expiry": expiry,
-                    "strike": strike,
-                    "lotsize": lotsize,
                 })
-        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT)")
+        print(f"✅ Loaded {len(scrip_master)} Instruments")
         return True
     except Exception as e:
         print(f"⚠️ Cache read error: {e}")
@@ -147,7 +127,7 @@ def download_scrip_master_stream():
                     if chunk:
                         f.write(chunk)
             os.replace(tmp, SCRIP_FILE)
-            print("✅ Stream Download Complete!")
+            print("✅ Download Complete!")
             load_local_scrip_master()
     except Exception as e:
         print(f"⚠️ Download error: {e}")
@@ -156,10 +136,10 @@ def download_scrip_master_stream():
 def login_smart_api():
     global smart_api, session_data, jwt_token
     if SmartConnect is None:
-        print("⚠️ SmartApi SDK not installed; running in simulated-only mode.")
+        print("⚠️ SmartApi SDK not installed; simulated-only mode.")
         return False
     if not (API_KEY and CLIENT_CODE and PIN and TOTP_SECRET and API_KEY != "your_smartapi_key_here"):
-        print("⚠️ Angel One credentials missing in .env; running in simulated-only mode.")
+        print("⚠️ Angel One credentials missing in .env; simulated-only mode.")
         return False
     try:
         totp = pyotp.TOTP(TOTP_SECRET).now()
@@ -169,17 +149,16 @@ def login_smart_api():
             jwt_token = session_data["data"]["jwtToken"]
             print("✅ Angel One Login SUCCESSFUL!")
             return True
-        print(f"⚠️ Angel One login failed: {session_data}")
+        print(f"⚠️ Login failed: {session_data}")
     except Exception as e:
         print(f"⚠️ Login Error: {e}")
     return False
 
 
 async def session_refresh_task():
-    """Auto re-login every 23 hours to prevent silent 24hr expiry."""
     while True:
         await asyncio.sleep(23 * 3600)
-        print("🔄 Auto-refreshing Angel One Session (23hr cycle)...")
+        print("🔄 Auto-refreshing Angel One session...")
         login_smart_api()
 
 
@@ -195,32 +174,34 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="ProChart Terminal Engine v2026.10", lifespan=lifespan)
+app = FastAPI(title="ProChart Terminal v2026.10", lifespan=lifespan)
 
-# Security: only trust local origins; never `allow_origins=["*"]` with credentials
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://localhost",
-        "http://127.0.0.1",
-        "null",  # for file:// testing
+        "http://localhost:8000", "http://127.0.0.1:8000",
+        "http://localhost", "http://127.0.0.1", "null",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-
-# ---------- Static files (serve the UI directly from FastAPI) ----------
 app.mount("/css", StaticFiles(directory=os.path.join(STATIC_DIR, "css")), name="css")
-app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js")
+app.mount("/js",  StaticFiles(directory=os.path.join(STATIC_DIR, "js")),  name="js")
 
 
 @app.get("/")
 def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/favicon.ico")
+def favicon():
+    f = os.path.join(STATIC_DIR, "favicon.ico")
+    if os.path.exists(f):
+        return FileResponse(f, media_type="image/x-icon")
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"), status_code=204)
 
 
 @app.get("/api/status")
@@ -238,42 +219,35 @@ def search(q: str = ""):
     query = q.strip().upper()
     if not query:
         return {"results": POPULAR_TOKENS}
-
-    results = []
-    seen_tokens = set()
-
+    results, seen = [], set()
     for s in POPULAR_TOKENS:
         if query in s["symbol"].upper() or query in s["name"].upper():
             results.append(s)
-            seen_tokens.add(f"{s['exchange']}:{s['token']}")
-
+            seen.add(f"{s['exchange']}:{s['token']}")
     if scrip_master:
         for s in scrip_master:
             if query in s["symbol_upper"] or query in s["name_upper"]:
                 key = f"{s['exchange']}:{s['token']}"
-                if key in seen_tokens:
+                if key in seen:
                     continue
                 results.append({
-                    "symbol": s["symbol"],
-                    "name": s["name"],
-                    "token": s["token"],
-                    "exchange": s["exchange"],
+                    "symbol": s["symbol"], "name": s["name"],
+                    "token": s["token"], "exchange": s["exchange"],
                     "type": s.get("type", "EQ"),
                 })
-                seen_tokens.add(key)
+                seen.add(key)
                 if len(results) >= 50:
                     break
     return {"results": results}
 
 
-# ---------- Candle cache with TTL + size limit ----------
 candle_cache = {}
 MAX_CACHE_SIZE = 50
 
 
 def cache_cleanup():
     if len(candle_cache) > MAX_CACHE_SIZE:
-        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[: len(candle_cache) - MAX_CACHE_SIZE]
+        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[:len(candle_cache) - MAX_CACHE_SIZE]
         for k, _ in oldest:
             del candle_cache[k]
 
@@ -294,10 +268,8 @@ def _auth_headers():
 
 @app.get("/api/quote")
 def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
-    """Real-time LTP quote. Accepts exchange+token (preferred) or falls back to symbol lookup."""
     exchange = (exchange or "NSE").strip()
     token = str(token or "").strip()
-
     if not token and symbol:
         for s in POPULAR_TOKENS:
             if s["symbol"].upper() == symbol.upper():
@@ -305,10 +277,8 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
                 break
     if not token:
         return {"status": False, "message": "No token resolved"}
-
     if not jwt_token:
         return {"status": False, "message": "Not logged in"}
-
     try:
         payload = {"mode": "FULL", "exchangeTokens": {exchange: [str(token)]}}
         url = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/"
@@ -333,35 +303,24 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
 
 
 @app.get("/api/candles")
-def get_candles(
-    symbol: str = "NIFTY",
-    token: str = "99926000",
-    exchange: str = "NSE",
-    interval: str = "15",
-):
-    if not symbol or symbol in ("undefined", "null"):
-        symbol = "NIFTY"
-    if not token or token in ("undefined", "null", ""):
-        token = "99926000"
-    if not exchange or exchange in ("undefined", "null", ""):
-        exchange = "NSE"
+def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = "NSE", interval: str = "15"):
+    if not symbol or symbol in ("undefined", "null"): symbol = "NIFTY"
+    if not token or token in ("undefined", "null", ""): token = "99926000"
+    if not exchange or exchange in ("undefined", "null", ""): exchange = "NSE"
+    interval = str(interval)
 
-    # Try to resolve token/exchange from symbol if not provided
     if token == "99926000" and symbol.upper() != "NIFTY":
         for s in POPULAR_TOKENS:
             if s["symbol"].upper() == symbol.upper():
-                token = str(s["token"])
-                exchange = s["exchange"]
+                token, exchange = str(s["token"]), s["exchange"]
                 break
 
-    interval = str(interval)
     cache_key = f"{exchange}:{token}_{interval}"
     now_ts = time.time()
-
     if cache_key in candle_cache:
-        cached_time, cached_data = candle_cache[cache_key]
-        if now_ts - cached_time < 3.0:
-            return cached_data
+        ct, cd = candle_cache[cache_key]
+        if now_ts - ct < 3.0:
+            return cd
 
     is_live = bool(smart_api and jwt_token)
     if is_live:
@@ -373,7 +332,6 @@ def get_candles(
             smart_int = interval_map.get(interval, "FIFTEEN_MINUTE")
             to_date = datetime.now(IST)
             from_date = to_date - timedelta(days=30 if smart_int != "ONE_DAY" else 500)
-
             res = smart_api.getCandleData({
                 "exchange": exchange,
                 "symboltoken": str(token),
@@ -384,16 +342,21 @@ def get_candles(
             if res and isinstance(res, dict) and res.get("status") and res.get("data"):
                 candles = []
                 for c in res["data"]:
-                    dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
-                    # Lightweight-charts expects UNIX SECONDS
-                    candles.append({
-                        "time": int(dt.timestamp()),
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "volume": int(c[5]) if len(c) > 5 and c[5] else 0,
-                    })
+                    try:
+                        if len(c) < 5: continue
+                        if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
+                        o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                        if not (o and h and l and cl): continue
+                        if h < l or o <= 0 or cl <= 0: continue
+                        dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                        vol = int(c[5]) if len(c) > 5 and c[5] else 0
+                        candles.append({
+                            "time": int(dt.timestamp()),
+                            "open": o, "high": h, "low": l, "close": cl,
+                            "volume": vol,
+                        })
+                    except Exception:
+                        continue
                 if candles:
                     out = {"status": "success", "source": "AngelOne", "candles": candles}
                     candle_cache[cache_key] = (now_ts, out)
@@ -402,10 +365,8 @@ def get_candles(
         except Exception as e:
             print(f"⚠️ Candle Fetch Exception: {e}")
 
-    # ---- Fallback: simulated realistic random walk ----
     interval_ms_map = {"1": 60, "3": 180, "5": 300, "15": 900, "30": 1800, "60": 3600, "D": 86400}
     step_s = interval_ms_map.get(interval, 900)
-
     base = 22548.16
     for item in POPULAR_TOKENS:
         if item["symbol"].upper() == symbol.upper():
@@ -414,7 +375,6 @@ def get_candles(
 
     count = 160
     end_ts = int(datetime.now(IST).timestamp())
-    # align last candle to a round step boundary
     end_ts = end_ts - (end_ts % step_s)
     start_time = end_ts - (count - 1) * step_s
 
@@ -429,10 +389,8 @@ def get_candles(
         v = int(100000 + random.random() * 600000)
         candles.append({
             "time": int(start_time + i * step_s),
-            "open": round(o, 2),
-            "high": round(h, 2),
-            "low": round(l, 2),
-            "close": round(c, 2),
+            "open": round(o, 2), "high": round(h, 2),
+            "low": round(l, 2), "close": round(c, 2),
             "volume": v,
         })
         p = c
@@ -445,5 +403,4 @@ def get_candles(
 
 if __name__ == "__main__":
     import uvicorn
-    # Bind to loopback only — never expose to LAN/public
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

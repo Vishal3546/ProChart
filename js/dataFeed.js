@@ -1,17 +1,14 @@
 /* ============================================================
- * DataFeed — client-side API client (v2026.10)
- * Works whether page is opened from FastAPI (same-origin) or file://
- * (falls back to http://127.0.0.1:8000 when file://).
- * Returns candles with UNIX-second timestamps.
+ * DataFeed — client API client (v2026.10)
+ * Same-origin when served from FastAPI; file:// fallback to localhost.
+ * Returns UNIX-second candles; sanitizes NaN/invalid rows.
  * ============================================================ */
 class DataFeed {
     constructor() {
-        // When served from FastAPI, use relative URLs (works through reverse proxies too).
-        // When opened from file:// (double-clicked), fall back to localhost.
         if (window.location.protocol === 'file:') {
             this.baseUrl = 'http://127.0.0.1:8000';
         } else {
-            this.baseUrl = '';  // same origin
+            this.baseUrl = '';
         }
     }
 
@@ -21,25 +18,20 @@ class DataFeed {
 
     async fetchCandleData(symbol = 'NIFTY', timeframe = '15', meta = {}) {
         try {
-            const params = new URLSearchParams({
-                symbol: symbol || 'NIFTY',
-                interval: timeframe,
-            });
+            const params = new URLSearchParams({ symbol: symbol || 'NIFTY', interval: timeframe });
             if (meta.token)    params.set('token', meta.token);
             if (meta.exchange) params.set('exchange', meta.exchange);
 
-            const url = `${this.baseUrl}/api/candles?${params.toString()}`;
-            const res = await fetch(url);
+            const res = await fetch(`${this.baseUrl}/api/candles?${params.toString()}`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
 
             if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
                 return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
             }
-            // Fallback
             return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
         } catch (err) {
-            console.warn('API candle fetch failed, using fallback generator:', err.message);
+            console.warn('API candle fetch failed, using fallback:', err.message);
             return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
         }
     }
@@ -49,19 +41,15 @@ class DataFeed {
             const params = new URLSearchParams({ symbol });
             if (meta.token)    params.set('token', meta.token);
             if (meta.exchange) params.set('exchange', meta.exchange);
-            const url = `${this.baseUrl}/api/quote?${params.toString()}`;
-            const res = await fetch(url);
+            const res = await fetch(`${this.baseUrl}/api/quote?${params.toString()}`);
             if (!res.ok) return null;
             return await res.json();
-        } catch (err) {
-            return null;
-        }
+        } catch (e) { return null; }
     }
 
     async fetchStatus() {
         try {
-            const url = `${this.baseUrl}/api/status`;
-            const res = await fetch(url);
+            const res = await fetch(`${this.baseUrl}/api/status`);
             if (!res.ok) return null;
             return await res.json();
         } catch (e) { return null; }
@@ -69,8 +57,7 @@ class DataFeed {
 
     async search(q) {
         try {
-            const url = `${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`;
-            const res = await fetch(url);
+            const res = await fetch(`${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`);
             if (!res.ok) return [];
             const data = await res.json();
             return Array.isArray(data.results) ? data.results : [];
@@ -78,14 +65,18 @@ class DataFeed {
     }
 
     formatCandles(rawCandles) {
-        return rawCandles.map(c => ({
-            time: c.time,  // already UNIX seconds from server; strings also handled downstream
-            open: parseFloat(c.open !== undefined ? c.open : c[1]),
-            high: parseFloat(c.high !== undefined ? c.high : c[2]),
-            low: parseFloat(c.low !== undefined ? c.low : c[3]),
-            close: parseFloat(c.close !== undefined ? c.close : c[4]),
-            volume: parseFloat(c.volume !== undefined ? c.volume : (c[5] || 0)),
-        }));
+        return rawCandles
+            .filter(c => c && c.open != null && c.high != null && c.low != null && c.close != null)
+            .map(c => ({
+                time: c.time,
+                open: parseFloat(c.open !== undefined ? c.open : c[1]),
+                high: parseFloat(c.high !== undefined ? c.high : c[2]),
+                low: parseFloat(c.low !== undefined ? c.low : c[3]),
+                close: parseFloat(c.close !== undefined ? c.close : c[4]),
+                volume: parseFloat(c.volume !== undefined ? c.volume : (c[5] || 0)),
+            }))
+            .filter(c => isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) &&
+                         c.high >= c.low && c.high > 0 && c.low > 0);
     }
 
     generateFallbackCandles(tf = '15') {
