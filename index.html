@@ -3,29 +3,37 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ProChart Terminal™ v2026</title>
+    <title>ProChart Terminal™ v2026.10</title>
     <link rel="stylesheet" href="css/styles.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body class="dark-theme">
+    <div id="toastContainer" class="toast-container"></div>
+
     <div class="app-container">
         <header class="topbar">
             <div class="brand">
                 <i class="fa-solid fa-chart-line"></i>
                 <span class="brand-name">ProChart<sup>™</sup></span>
-                <span class="badge-v2026">v2026</span>
+                <span class="badge-v2026">v2026.10</span>
             </div>
 
             <div class="symbol-info">
                 <span id="activeSymbol" class="symbol-name">NIFTY 15m</span>
-                <span id="activeLtp" class="symbol-price text-success">22668.42</span>
-                <span id="activeChange" class="symbol-change text-muted">+0.00%</span>
+                <span id="activeLtp" class="symbol-price text-success">0.00</span>
+                <span id="activeChange" class="symbol-change text-muted">+0.00 (0.00%)</span>
+                <span id="connBadge" class="conn-badge conn-sim" title="Data source status">
+                    <span class="conn-dot"></span><span id="connText">SIMULATED</span>
+                </span>
             </div>
 
             <div class="dropdown-wrapper search-box">
                 <i class="fa-solid fa-magnifying-glass"></i>
-                <input type="text" id="searchInput" placeholder="Search NSE/BSE..." autocomplete="off">
+                <input type="text" id="searchInput" placeholder="Search NSE/BSE/NFO..." autocomplete="off">
                 <div id="searchDropdown" class="custom-dropdown"></div>
             </div>
 
@@ -50,13 +58,21 @@
                     <div id="patternsDropdown" class="custom-dropdown">
                         <div class="dropdown-header">Master Control</div>
                         <div class="dropdown-item">
-                            <input type="checkbox" id="pat_master" checked> <label for="pat_master" style="font-weight:bold; color:#089981;">Enable All AI Scanners</label>
+                            <input type="checkbox" id="pat_master" checked>
+                            <label for="pat_master" style="font-weight:bold; color:#089981;">Enable All AI Scanners</label>
                         </div>
-                        <div class="dropdown-header">Individual Patterns (ON/OFF)</div>
+                        <div class="dropdown-header">Candlestick Patterns</div>
                         <div class="dropdown-item"><input type="checkbox" id="pat_engulfing" checked> <label for="pat_engulfing">Bullish/Bearish Engulfing</label></div>
-                        <div class="dropdown-item"><input type="checkbox" id="pat_star" checked> <label for="pat_star">Morning/Evening Star</label></div>
-                        <div class="dropdown-item"><input type="checkbox" id="pat_hammer" checked> <label for="pat_hammer">Hammer & Shooting Star</label></div>
-                        <div class="dropdown-item"><input type="checkbox" id="pat_doji" checked> <label for="pat_doji">Doji Reversals</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_star" checked>       <label for="pat_star">Morning/Evening Star</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_hammer" checked>     <label for="pat_hammer">Hammer &amp; Shooting Star</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_doji" checked>       <label for="pat_doji">Doji Reversals</label></div>
+                        <div class="dropdown-header">Advanced Patterns</div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_vcp" checked>        <label for="pat_vcp">Minervini VCP</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_dbl" checked>        <label for="pat_dbl">Double Bottom/Top</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_flag" checked>       <label for="pat_flag">Flags &amp; Pennants</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_div" checked>        <label for="pat_div">RSI Divergence</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_trap" checked>       <label for="pat_trap">3:25 PM Closing Trap</label></div>
+                        <div class="dropdown-item"><input type="checkbox" id="pat_abs" checked>        <label for="pat_abs">Order-Flow Absorption</label></div>
                     </div>
                 </div>
             </div>
@@ -70,53 +86,83 @@
             <aside class="analytics-sidebar">
                 <div class="panel-card">
                     <h3><i class="fa-solid fa-crown text-warning"></i> Master Pro Dashboard</h3>
-                    <div class="metric-row"><span>BOLLINGER SQUEEZE</span><div id="signalSqueeze" class="metric-val text-warning">⚡ SQUEEZE</div></div>
-                    <div class="metric-row"><span>WYCKOFF VSA</span><div id="signalVsa" class="metric-val text-info">NORMAL VOLUME</div></div>
-                    <div class="metric-row"><span>MACD DECELERATION</span><div id="signalMacd" class="metric-val text-success">BULLISH</div></div>
+                    <div class="metric-row"><span>BOLLINGER SQUEEZE</span><div id="signalSqueeze" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>WYCKOFF VSA</span><div id="signalVsa" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>MACD MOMENTUM</span><div id="signalMacd" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>RSI REGIME</span><div id="signalRsi" class="metric-val text-muted">—</div></div>
                 </div>
 
                 <div class="panel-card">
                     <h3><i class="fa-solid fa-sliders text-primary"></i> Options Greeks</h3>
                     <div class="greeks-controls">
-                        <input type="number" id="greekStrike" value="22650" style="width: 70px;">
-                        <select id="greekType"><option value="CE">CE</option><option value="PE">PE</option></select>
-                        <input type="number" id="greekIv" value="18" style="width: 50px;">
+                        <input type="number" id="greekSpot"  value="22668.42" step="0.01" style="width: 80px;" placeholder="Spot">
+                        <input type="number" id="greekStrike" value="22650"    step="1"    style="width: 70px;" placeholder="Strike">
+                        <select id="greekType">
+                            <option value="CE">CE</option>
+                            <option value="PE">PE</option>
+                        </select>
+                        <input type="number" id="greekIv" value="18" step="0.1" min="1" max="200" style="width: 55px;" placeholder="IV %">
+                        <input type="number" id="greekDte" value="7" step="0.5" min="0" style="width: 50px;" placeholder="DTE">
+                        <button id="greekCalcBtn" class="btn btn-mini"><i class="fa-solid fa-calculator"></i></button>
                     </div>
                     <div class="greeks-grid">
-                        <div class="greek-box"><span class="lbl">Δ Delta</span><span id="greekDelta" class="val">0.52</span></div>
-                        <div class="greek-box"><span class="lbl">Γ Gamma</span><span id="greekGamma" class="val">0.0007</span></div>
-                        <div class="greek-box"><span class="lbl">Θ Theta</span><span id="greekTheta" class="val">-16.1</span></div>
-                        <div class="greek-box"><span class="lbl">ν Vega</span><span id="greekVega" class="val">12.5</span></div>
+                        <div class="greek-box"><span class="lbl">Δ Delta</span><span id="greekDelta" class="val">—</span></div>
+                        <div class="greek-box"><span class="lbl">Γ Gamma</span><span id="greekGamma" class="val">—</span></div>
+                        <div class="greek-box"><span class="lbl">Θ Theta</span><span id="greekTheta" class="val">—</span></div>
+                        <div class="greek-box"><span class="lbl">ν Vega</span><span id="greekVega" class="val">—</span></div>
+                        <div class="greek-box"><span class="lbl">ρ Rho</span><span id="greekRho" class="val">—</span></div>
+                        <div class="greek-box"><span class="lbl">IV%</span><span id="greekIvDisp" class="val">—</span></div>
                     </div>
                 </div>
 
                 <div class="panel-card">
                     <h3><i class="fa-solid fa-list-check text-success"></i> 6-Point Breakout Checklist</h3>
-                    <div id="checklistResult" class="checklist-status text-warning">NEUTRAL / CONSOLIDATION (4/6)</div>
+                    <div id="checklistResult" class="checklist-status text-muted">— / 6</div>
                 </div>
 
                 <div class="panel-card">
-                    <h3><i class="fa-solid fa-shield-halved text-danger"></i> VCP & 3:25 PM Trap</h3>
-                    <div class="metric-row"><span>MINERVINI VCP</span><div id="vcpResult" class="metric-val text-success">🟢 VALID VCP</div></div>
-                    <div class="metric-row"><span>CLOSING TRAP</span><div id="trapResult" class="metric-val text-muted">INACTIVE (3:15-3:30 PM)</div></div>
+                    <h3><i class="fa-solid fa-shield-halved text-danger"></i> Institutional Scans</h3>
+                    <div class="metric-row"><span>MINERVINI VCP</span><div id="vcpResult" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>DOUBLE BOTTOM/TOP</span><div id="dblResult" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>FLAGS / PENNANTS</span><div id="flagResult" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>RSI DIVERGENCE</span><div id="divResult" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>3:25 PM TRAP</span><div id="trapResult" class="metric-val text-muted">—</div></div>
+                    <div class="metric-row"><span>ABSORPTION</span><div id="absResult" class="metric-val text-muted">—</div></div>
+                </div>
+
+                <div class="panel-card panel-card-feed">
+                    <h3><i class="fa-solid fa-satellite-dish text-info"></i> Live Signal Feed</h3>
+                    <div id="signalFeed" class="signal-feed"></div>
                 </div>
             </aside>
         </main>
 
         <footer class="bottom-statusbar">
-            <div class="status-live"><span class="dot-green"></span><span id="clockIst">Live 09:15:00 AM IST</span></div>
-            <div>v5.2.1 Engine | Angel One Live API</div>
+            <div class="status-live">
+                <span id="connDot" class="dot-green"></span>
+                <span id="clockIst">Live --:--:-- IST</span>
+            </div>
+            <div id="engineFooter">v2026.10 Engine • Connecting…</div>
         </footer>
     </div>
 
-    <!-- JS ENGINES -->
+    <!-- JS CORE -->
     <script src="js/indicators.js"></script>
+
+    <!-- ENGINES -->
     <script src="js/candlePatterns.js"></script>
+    <script src="js/greeksEngine.js"></script>
     <script src="js/masterProEngine.js"></script>
     <script src="js/breakoutChecklistEngine.js"></script>
     <script src="js/vcpPatternEngine.js"></script>
+    <script src="js/doubleBottomEngine.js"></script>
+    <script src="js/flagPatternEngine.js"></script>
+    <script src="js/divergenceEngine.js"></script>
     <script src="js/closingTrapEngine.js"></script>
-    <script src="js/greeksEngine.js"></script>
+    <script src="js/orderFlowAbsorptionEngine.js"></script>
+    <script src="js/preMarketEngine.js"></script>
+
+    <!-- BRIDGE + FEED + APP -->
     <script src="js/tvBridge.js"></script>
     <script src="js/dataFeed.js"></script>
     <script src="js/app.js"></script>

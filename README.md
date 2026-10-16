@@ -1,54 +1,76 @@
-# ProChart Terminal™
+# ProChart Terminal™ v2026.10
 
-> **Advanced AI & Institutional Trading Terminal**
+> **Advanced AI & Institutional Trading Terminal** — Angel One SmartAPI + Lightweight Charts + a battery of institutional pattern & options engines.
 
-ProChart Terminal™ is a professional, high-performance web-based financial charting and market analysis platform designed for institutional traders, technical analysts, and active market participants.
-
----
-
-## ✨ Features
-
-- **Interactive High-Performance Charting**: Smooth canvas/SVG rendering with multi-timeframe support (1m, 3m, 5m, 15m, 30m, 1H, 4H, 1D).
-- **Institutional Technical Indicators**:
-  - Moving Averages (SMA, EMA)
-  - Bollinger Bands
-  - RSI (Relative Strength Index)
-  - MACD, ATR, SuperTrend, VWAP
-- **Advanced Pattern Recognition & Engines**:
-  - Master Pro Engine
-  - Breakout Checklist Engine
-  - Candle Patterns Engine
-  - Closing Trap Engine
-  - Divergence Engine
-  - Double Bottom & VCP Pattern Engines
-  - Flag Pattern & Order Flow Absorption Engines
-  - Pre-Market Gap & Range Analysis
-- **Options Greeks & Derivatives Engine**: Real-time Delta, Gamma, Theta, Vega estimation and implied volatility dynamics.
-- **Sleek Cyber-Dark Theme**: Built with custom typography (JetBrains Mono & Inter) and glassmorphic UI components.
+ProChart Terminal™ is a professional, high-performance web-based financial charting and market-analysis platform built for active NSE / BSE / NFO traders.
 
 ---
 
-## 🚀 Getting Started
+## ✨ Features (v2026.10)
 
-### Prerequisites
+- **Real-time Angel One SmartAPI** candlestick & quote streaming (with smart fallback to simulated data when not logged in).
+- **Interactive charting** powered by TradingView's Lightweight Charts v5 with multi-timeframe support (1m / 3m / 5m / 15m / 30m / 1H / 1D).
+- **Institutional indicators**:
+  - SMA, EMA (20/50/200)
+  - Bollinger Bands (with %b / squeeze detection)
+  - RSI 14, MACD (12,26,9), VWAP (session-anchored IST 9:15 AM)
+  - ATR, SuperTrend (10,3)
+- **AI / Institutional Pattern Engines** (all wired to the live sidebar and signal feed):
+  - 🕯 Candlestick patterns (Hammer, Shooting Star, Engulfing, Morning/Evening Star, Doji) — swing-context aware
+  - 👑 Master Pro Dashboard — Bollinger Squeeze, Wyckoff VSA, MACD acceleration, RSI regime
+  - ✅ 6-Point Breakout Checklist (EMA stack, 20-bar BO, volume, RSI, strong close)
+  - 🛡 Mark Minervini **VCP** (volatility contraction pattern with volume dry-up)
+  - 💠 **Double Bottom / Double Top** (W & M patterns with measured move targets)
+  - 🚩 **Bull / Bear Flags & Pennants** (impulse + tight counter-trend channel)
+  - 🔀 **RSI Divergence** (bullish / bearish swing pivots)
+  - 🕒 **3:25 PM Closing Trap** (late-day institutional exhaustion, IST-aware)
+  - 🧽 **Order-Flow Absorption** (exhaustion / climax / rejection candles)
+- **Options Greeks** — real **Black–Scholes–Merton** calculator (Δ, Γ, Θ-per-day, ν-per-1%-IV, ρ).
+- **Live connection badge** — clearly shows whether data is LIVE (Angel One) or SIMULATED.
+- **Live Signal Feed** (sidebar) — timestamped alerts from every engine.
+- **Cyber-Dark Theme** with Inter + JetBrains Mono typography, smooth flash-on-tick animations, toast notifications.
+- **Security-hardened backend**: binds to `127.0.0.1` only, CORS locked to localhost, static UI served directly from FastAPI.
 
-No server or database setup required. Just a modern web browser!
+---
 
-### Running Locally
+## 🚀 Quick Start
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Vishal3546/ProChart.git
-   ```
+### 1. Clone & install
 
-2. Open the directory:
-   ```bash
-   cd ProChart
-   ```
+```bash
+git clone https://github.com/Vishal3546/ProChart.git
+cd ProChart
 
-3. Launch in your browser:
-   - Double-click `index.html` to open directly in Chrome/Edge/Firefox, or
-   - Use any static local server (e.g., Live Server in VS Code, `npx serve`, or `python -m http.server 8000`).
+python -m venv .venv
+# Windows:  .venv\Scripts\activate
+# Linux/Mac: source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+### 2. (Optional) Configure Angel One credentials
+
+Copy `.env.example` to `.env` and fill in your Angel One SmartAPI key, client code, PIN, and TOTP secret:
+
+```
+ANGEL_API_KEY=your_api_key
+ANGEL_CLIENT_CODE=ABCD1234
+ANGEL_PIN=123456
+ANGEL_TOTP_SECRET=BASE32SECRET
+```
+
+If you skip this, the terminal still works perfectly with a realistic simulated feed.
+
+### 3. Run the server
+
+```bash
+python server.py
+# or: uvicorn server:app --host 127.0.0.1 --port 8000
+```
+
+Now open **http://127.0.0.1:8000** in Chrome / Edge / Firefox. That's it.
+
+> The first launch downloads the ~35 MB Angel One scrip master automatically (cached locally).
 
 ---
 
@@ -56,39 +78,50 @@ No server or database setup required. Just a modern web browser!
 
 ```
 ProChart/
+├── index.html                    # Main terminal UI
+├── server.py                     # FastAPI backend (Angel One bridge)
+├── requirements.txt              # Python dependencies
+├── .env.example                  # Sample credential file
+├── scripMaster.json              # (downloaded at first run) — Angel One instrument master
 ├── css/
-│   └── styles.css                    # Design system, themes & UI styles
-├── js/
-│   ├── app.js                        # Main application controller
-│   ├── chartEngine.js                # Core charting and rendering logic
-│   ├── dataFeed.js                   # Market data simulation and streams
-│   ├── indicators.js                 # Technical indicators calculations
-│   ├── greeksEngine.js               # Options Greeks analytics
-│   ├── candlePatterns.js             # Candlestick pattern detection
-│   ├── divergenceEngine.js           # RSI/MACD divergence detector
-│   ├── breakoutChecklistEngine.js    # Breakout validation rules
-│   ├── closingTrapEngine.js          # Closing session trap scanner
-│   ├── vcpPatternEngine.js           # Volatility Contraction Pattern
-│   ├── doubleBottomEngine.js         # Double bottom engine
-│   ├── flagPatternEngine.js          # Flag & pennant pattern scanner
-│   ├── masterProEngine.js            # Combined institutional signal aggregator
-│   ├── orderFlowAbsorptionEngine.js  # Order flow absorption analytics
-│   ├── patternScanner.js             # Multi-pattern scanner
-│   └── preMarketEngine.js            # Pre-market gap analysis
-├── index.html                        # Main terminal interface
-└── README.md                         # Project documentation
+│   └── styles.css                # Design system (cyber-dark theme)
+└── js/
+    ├── app.js                    # Main controller
+    ├── tvBridge.js               # Lightweight Charts v5 wrapper
+    ├── dataFeed.js               # API client (relative URLs + file:// fallback)
+    ├── indicators.js             # SMA/EMA/RSI/MACD/VWAP/BB/ATR/SuperTrend/StDev
+    ├── candlePatterns.js         # Hammer/Engulfing/Star/Doji
+    ├── masterProEngine.js        # Squeeze/VSA/MACD/RSI regime aggregator
+    ├── breakoutChecklistEngine.js# 6-point institutional breakout checklist
+    ├── vcpPatternEngine.js       # Minervini VCP
+    ├── doubleBottomEngine.js     # Double Bottom / Double Top
+    ├── flagPatternEngine.js      # Bull/Bear flags & pennants
+    ├── divergenceEngine.js       # RSI bullish/bearish divergence
+    ├── closingTrapEngine.js      # 3:15–3:30 PM IST trap detector
+    ├── orderFlowAbsorptionEngine.js  # Absorption / climax / rejection
+    ├── greeksEngine.js           # Black-Scholes-Merton Greeks calculator
+    └── preMarketEngine.js        # Pivot-point helper
 ```
+
+---
+
+## 🔒 Security Notes
+
+- Backend binds to **127.0.0.1** only (not reachable from LAN/internet).
+- CORS is locked to `localhost` / `127.0.0.1`; `allow_credentials` is disabled.
+- Credentials live in `.env` (never committed).
+- The scrip master is downloaded over HTTPS on first run and cached locally.
 
 ---
 
 ## 🛠️ Tech Stack
 
-- **HTML5 & CSS3** (Vanilla CSS with custom design tokens)
-- **Modern JavaScript (ES6+)**
-- **Font Awesome & Google Fonts** (JetBrains Mono & Inter)
+- **Frontend**: Vanilla HTML5/CSS3/ES6+ JavaScript, Lightweight Charts v5.2.1, Font Awesome, Google Fonts (Inter + JetBrains Mono).
+- **Backend**: Python 3.10+ with FastAPI + Uvicorn, SmartAPI Python SDK for Angel One.
+- **Analytics**: Custom pure-JS technical-indicator library (no external numerics dependency).
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License.
+MIT

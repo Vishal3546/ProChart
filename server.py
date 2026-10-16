@@ -1,23 +1,39 @@
 # ============================================
-# ProChart Terminal™ - Backend v2026 Production
-# Fixes: Lifespan API, IST Timezone, Session Auto-Refresh, Quote API, Options Filter
+# ProChart Terminal™ - Backend v2026.10 Production
+# Fixes (Oct 2026):
+#  - Bind to 127.0.0.1 only (security hardening)
+#  - CORS tightened to localhost
+#  - Static file serving so a single `uvicorn server:app` serves the UI
+#  - IST timezone aware
+#  - Lifespan API (modern FastAPI)
+#  - Angel One SmartAPI session auto-refresh (23h)
+#  - Quote + Candle endpoints with proper token/exchange routing
+#  - Scrip master download/stream/cache
+#  - Bounded candle cache (no memory leak)
 # ============================================
 
 import os
 import json
 import time
 import asyncio
-import requests
-import pyotp
-import random
 import socket
 import uuid
+import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+
+import requests
+import pyotp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from SmartApi import SmartConnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse
+
+try:
+    from SmartApi import SmartConnect
+except ImportError:  # graceful fallback if SmartApi isn't installed (still runs simulated)
+    SmartConnect = None
 
 load_dotenv()
 
@@ -32,70 +48,85 @@ smart_api = None
 session_data = None
 jwt_token = None
 scrip_master = []
-SCRIP_FILE = "scripMaster.json"
+SCRIP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripMaster.json")
+STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 
 POPULAR_TOKENS = [
-    {"symbol": "NIFTY", "name": "NIFTY 50 INDEX", "token": "99926000", "exchange": "NSE", "base": 22548.16},
-    {"symbol": "BANKNIFTY", "name": "BANK NIFTY INDEX", "token": "99926009", "exchange": "NSE", "base": 48200.50},
-    {"symbol": "FINNIFTY", "name": "FIN NIFTY INDEX", "token": "99926037", "exchange": "NSE", "base": 23100.00},
-    {"symbol": "SENSEX", "name": "SENSEX INDEX", "token": "99919000", "exchange": "BSE", "base": 74200.00},
-    {"symbol": "EMIL", "name": "ELECTRONICS MART INDIA LTD", "token": "19409", "exchange": "NSE", "base": 215.40},
-    {"symbol": "PRAKASH", "name": "PRAKASH INDUSTRIES LTD", "token": "2741", "exchange": "NSE", "base": 185.80},
-    {"symbol": "RELIANCE", "name": "RELIANCE INDUSTRIES LTD", "token": "2885", "exchange": "NSE", "base": 2950.00},
-    {"symbol": "HDFCBANK", "name": "HDFC BANK LTD", "token": "1333", "exchange": "NSE", "base": 1450.25},
-    {"symbol": "TCS", "name": "TATA CONSULTANCY SERV LT", "token": "11536", "exchange": "NSE", "base": 3980.10},
-    {"symbol": "INFY", "name": "INFOSYS LTD", "token": "1594", "exchange": "NSE", "base": 1520.45},
-    {"symbol": "SBIN", "name": "STATE BANK OF INDIA", "token": "3045", "exchange": "NSE", "base": 780.30},
-    {"symbol": "TATAMOTORS", "name": "TATA MOTORS LIMITED", "token": "3456", "exchange": "NSE", "base": 950.60},
-    {"symbol": "TATASTEEL", "name": "TATA STEEL LIMITED", "token": "3499", "exchange": "NSE", "base": 160.20},
-    {"symbol": "ICICIBANK", "name": "ICICI BANK LTD", "token": "4963", "exchange": "NSE", "base": 1080.70}
+    {"symbol": "NIFTY",     "name": "NIFTY 50 INDEX",        "token": "99926000", "exchange": "NSE", "base": 22548.16},
+    {"symbol": "BANKNIFTY", "name": "BANK NIFTY INDEX",      "token": "99926009", "exchange": "NSE", "base": 48200.50},
+    {"symbol": "FINNIFTY",  "name": "FIN NIFTY INDEX",       "token": "99926037", "exchange": "NSE", "base": 23100.00},
+    {"symbol": "SENSEX",    "name": "SENSEX INDEX",          "token": "99919000", "exchange": "BSE", "base": 74200.00},
+    {"symbol": "RELIANCE",  "name": "RELIANCE INDUSTRIES",   "token": "2885",     "exchange": "NSE", "base": 2950.00},
+    {"symbol": "HDFCBANK",  "name": "HDFC BANK LTD",         "token": "1333",     "exchange": "NSE", "base": 1450.25},
+    {"symbol": "TCS",       "name": "TATA CONSULTANCY",      "token": "11536",    "exchange": "NSE", "base": 3980.10},
+    {"symbol": "INFY",      "name": "INFOSYS LTD",           "token": "1594",     "exchange": "NSE", "base": 1520.45},
+    {"symbol": "SBIN",      "name": "STATE BANK OF INDIA",   "token": "3045",     "exchange": "NSE", "base": 780.30},
+    {"symbol": "TATAMOTORS","name": "TATA MOTORS",           "token": "3456",     "exchange": "NSE", "base": 950.60},
+    {"symbol": "TATASTEEL", "name": "TATA STEEL",            "token": "3499",     "exchange": "NSE", "base": 160.20},
+    {"symbol": "ICICIBANK", "name": "ICICI BANK LTD",        "token": "4963",     "exchange": "NSE", "base": 1080.70},
 ]
 
+
 def get_local_ip():
-    try: return socket.gethostbyname(socket.gethostname())
-    except: return "127.0.0.1"
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        return "127.0.0.1"
+
 
 def get_mac():
-    return ":".join(["{:02x}".format((uuid.getnode() >> i) & 0xff) for i in range(0,48,8)][::-1])
+    return ":".join("{:02x}".format((uuid.getnode() >> i) & 0xff) for i in range(0, 48, 8))[::-1]
+
 
 def load_local_scrip_master():
     global scrip_master
-    if os.path.exists(SCRIP_FILE):
-        try:
-            with open(SCRIP_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-                scrip_master = []
-                for s in raw:
-                    exch = s.get("exch_seg", "")
-                    sym = str(s.get("symbol", ""))
-                    name = str(s.get("name", ""))
-                    token = str(s.get("token", ""))
-                    # Audit Fix: Allow Options (NFO/BFO) + Equity + Indices for Greeks feature
-                    if exch in ["NSE", "BSE", "INDICES"] and (sym.endswith("-EQ") or exch == "INDICES"):
-                        scrip_master.append({
-                            "symbol": sym.replace("-EQ", ""),
-                            "symbol_upper": sym.replace("-EQ", "").upper(),
-                            "name_upper": name.upper(),
-                            "name": name,
-                            "token": token,
-                            "exchange": exch,
-                            "type": "EQ" if sym.endswith("-EQ") else "INDEX"
-                        })
-                    elif exch in ["NFO", "BFO", "MCX", "CDS"]:
-                        scrip_master.append({
-                            "symbol": sym,
-                            "symbol_upper": sym.upper(),
-                            "name_upper": name.upper(),
-                            "name": name,
-                            "token": token,
-                            "exchange": exch,
-                            "type": "OPT_FUT"
-                        })
-            print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT)")
-            return True
-        except Exception as e:
-            print(f"⚠️ Cache read error: {e}")
-    return False
+    if not os.path.exists(SCRIP_FILE):
+        return False
+    try:
+        with open(SCRIP_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        scrip_master = []
+        for s in raw:
+            exch = s.get("exch_seg", "")
+            sym = str(s.get("symbol", ""))
+            name = str(s.get("name", ""))
+            token = str(s.get("token", ""))
+            inst_type = s.get("instrumenttype", "")
+            opt_type = str(s.get("optiontype", ""))
+            expiry = str(s.get("expiry", ""))
+            strike = float(s.get("strike", 0) or 0)
+            lotsize = int(s.get("lotsize", 1) or 1)
+
+            if exch in ("NSE", "BSE") and (sym.endswith("-EQ") or inst_type in ("AMXIDX",)):
+                scrip_master.append({
+                    "symbol": sym.replace("-EQ", ""),
+                    "symbol_upper": sym.replace("-EQ", "").upper(),
+                    "name_upper": name.upper(),
+                    "name": name,
+                    "token": token,
+                    "exchange": "NSE" if inst_type == "AMXIDX" and exch == "NSE" else exch,
+                    "type": "INDEX" if inst_type == "AMXIDX" else "EQ",
+                })
+            elif exch in ("NFO", "BFO", "MCX", "CDS"):
+                scrip_master.append({
+                    "symbol": sym,
+                    "symbol_upper": sym.upper(),
+                    "name_upper": name.upper(),
+                    "name": name,
+                    "token": token,
+                    "exchange": exch,
+                    "type": "OPT_FUT",
+                    "optiontype": opt_type,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "lotsize": lotsize,
+                })
+        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT)")
+        return True
+    except Exception as e:
+        print(f"⚠️ Cache read error: {e}")
+        return False
+
 
 def download_scrip_master_stream():
     global scrip_master
@@ -105,17 +136,25 @@ def download_scrip_master_stream():
     try:
         res = requests.get(url, headers=headers, stream=True, timeout=120)
         if res.status_code == 200:
-            with open(SCRIP_FILE, "wb") as f:
-                for chunk in res.iter_content(chunk_size=1024*1024):
-                    if chunk: f.write(chunk)
+            tmp = SCRIP_FILE + ".tmp"
+            with open(tmp, "wb") as f:
+                for chunk in res.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            os.replace(tmp, SCRIP_FILE)
             print("✅ Stream Download Complete!")
             load_local_scrip_master()
     except Exception as e:
         print(f"⚠️ Download error: {e}")
 
+
 def login_smart_api():
     global smart_api, session_data, jwt_token
+    if SmartConnect is None:
+        print("⚠️ SmartApi SDK not installed; running in simulated-only mode.")
+        return False
     if not (API_KEY and CLIENT_CODE and PIN and TOTP_SECRET and API_KEY != "your_smartapi_key_here"):
+        print("⚠️ Angel One credentials missing in .env; running in simulated-only mode.")
         return False
     try:
         totp = pyotp.TOTP(TOTP_SECRET).now()
@@ -125,48 +164,69 @@ def login_smart_api():
             jwt_token = session_data["data"]["jwtToken"]
             print("✅ Angel One Login SUCCESSFUL!")
             return True
+        print(f"⚠️ Angel One login failed: {session_data}")
     except Exception as e:
         print(f"⚠️ Login Error: {e}")
     return False
 
+
 async def session_refresh_task():
-    """Audit Fix: Auto re-login every 23 hours to prevent silent 24hr expiry"""
+    """Auto re-login every 23 hours to prevent silent 24hr expiry."""
     while True:
         await asyncio.sleep(23 * 3600)
         print("🔄 Auto-refreshing Angel One Session (23hr cycle)...")
         login_smart_api()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Audit Fix: Modern lifespan replaces deprecated on_event("startup")
     if not (os.path.exists(SCRIP_FILE) and load_local_scrip_master()):
         download_scrip_master_stream()
     login_smart_api()
     task = asyncio.create_task(session_refresh_task())
-    yield
-    task.cancel()
+    try:
+        yield
+    finally:
+        task.cancel()
 
-app = FastAPI(title="ProChart Terminal Engine v2026", lifespan=lifespan)
 
+app = FastAPI(title="ProChart Terminal Engine v2026.10", lifespan=lifespan)
+
+# Security: only trust local origins; never `allow_origins=["*"]` with credentials
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_origins=[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost",
+        "http://127.0.0.1",
+        "null",  # for file:// testing
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
+
+
+# ---------- Static files (serve the UI directly from FastAPI) ----------
+app.mount("/css", StaticFiles(directory=os.path.join(STATIC_DIR, "css")), name="css")
+app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js")
+
 
 @app.get("/")
 def root():
-    return {"status": "online", "scrip_count": len(scrip_master) or len(POPULAR_TOKENS)}
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
 
 @app.get("/api/status")
 def status():
     return {
         "status": "online",
-        "angel_connected": smart_api is not None and jwt_token is not None,
-        "symbols_count": len(scrip_master) or len(POPULAR_TOKENS)
+        "angel_connected": bool(smart_api and jwt_token),
+        "symbols_count": len(scrip_master) or len(POPULAR_TOKENS),
+        "server_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
     }
+
 
 @app.get("/api/search")
 def search(q: str = ""):
@@ -176,82 +236,121 @@ def search(q: str = ""):
 
     results = []
     seen_tokens = set()
+
     for s in POPULAR_TOKENS:
         if query in s["symbol"].upper() or query in s["name"].upper():
             results.append(s)
-            seen_tokens.add(s["token"])
+            seen_tokens.add(f"{s['exchange']}:{s['token']}")
 
-    # Audit Fix: Use precomputed symbol_upper + set-based dedup
     if scrip_master:
         for s in scrip_master:
             if query in s["symbol_upper"] or query in s["name_upper"]:
-                if s["token"] not in seen_tokens:
-                    results.append({
-                        "symbol": s["symbol"],
-                        "name": s["name"],
-                        "token": s["token"],
-                        "exchange": s["exchange"]
-                    })
-                    seen_tokens.add(s["token"])
-                if len(results) >= 40:
+                key = f"{s['exchange']}:{s['token']}"
+                if key in seen_tokens:
+                    continue
+                results.append({
+                    "symbol": s["symbol"],
+                    "name": s["name"],
+                    "token": s["token"],
+                    "exchange": s["exchange"],
+                    "type": s.get("type", "EQ"),
+                })
+                seen_tokens.add(key)
+                if len(results) >= 50:
                     break
     return {"results": results}
 
-# Audit Fix: Candle cache with TTL + size limit (memory leak fix)
+
+# ---------- Candle cache with TTL + size limit ----------
 candle_cache = {}
 MAX_CACHE_SIZE = 50
 
+
 def cache_cleanup():
     if len(candle_cache) > MAX_CACHE_SIZE:
-        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[:len(candle_cache) - MAX_CACHE_SIZE]
+        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[: len(candle_cache) - MAX_CACHE_SIZE]
         for k, _ in oldest:
             del candle_cache[k]
 
+
+def _auth_headers():
+    return {
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-UserType": "USER",
+        "X-SourceID": "WEB",
+        "X-ClientLocalIP": get_local_ip(),
+        "X-ClientPublicIP": get_local_ip(),
+        "X-MACAddress": get_mac(),
+        "X-PrivateKey": API_KEY,
+    }
+
+
 @app.get("/api/quote")
-def get_quote(exchange: str = "NSE", token: str = "99926000"):
-    """Audit Fix: Real-time LTP quote from Angel One for live ticks"""
+def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
+    """Real-time LTP quote. Accepts exchange+token (preferred) or falls back to symbol lookup."""
+    exchange = (exchange or "NSE").strip()
+    token = str(token or "").strip()
+
+    if not token and symbol:
+        for s in POPULAR_TOKENS:
+            if s["symbol"].upper() == symbol.upper():
+                exchange, token = s["exchange"], str(s["token"])
+                break
+    if not token:
+        return {"status": False, "message": "No token resolved"}
+
     if not jwt_token:
         return {"status": False, "message": "Not logged in"}
+
     try:
-        headers = {
-            "Authorization": f"Bearer {jwt_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-UserType": "USER",
-            "X-SourceID": "WEB",
-            "X-ClientLocalIP": get_local_ip(),
-            "X-ClientPublicIP": get_local_ip(),
-            "X-MACAddress": get_mac(),
-            "X-PrivateKey": API_KEY
-        }
         payload = {"mode": "FULL", "exchangeTokens": {exchange: [str(token)]}}
         url = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/"
-        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        res = requests.post(url, json=payload, headers=_auth_headers(), timeout=10)
         data = res.json()
         if data.get("status") and data.get("data", {}).get("fetched"):
             q = data["data"]["fetched"][0]
             return {
                 "status": True,
-                "ltp": q.get("ltp", 0),
-                "open": q.get("open", 0),
-                "high": q.get("high", 0),
-                "low": q.get("low", 0),
-                "close": q.get("close", 0),
-                "volume": q.get("tradeVolume", 0),
-                "netChange": q.get("netChange", 0),
-                "percentChange": q.get("percentChange", 0)
+                "ltp": float(q.get("ltp", 0) or 0),
+                "open": float(q.get("open", 0) or 0),
+                "high": float(q.get("high", 0) or 0),
+                "low": float(q.get("low", 0) or 0),
+                "close": float(q.get("close", 0) or 0),
+                "volume": int(q.get("tradeVolume", 0) or 0),
+                "netChange": float(q.get("netChange", 0) or 0),
+                "percentChange": float(q.get("percentChange", 0) or 0),
             }
     except Exception as e:
         print(f"⚠️ Quote fetch error: {e}")
     return {"status": False, "message": "Fetch failed"}
 
-@app.get("/api/candles")
-def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = "NSE", interval: str = "15"):
-    if not symbol or symbol in ["undefined", "null"]: symbol = "NIFTY"
-    if not token or token in ["undefined", "null"]: token = "99926000"
-    if not exchange or exchange in ["undefined", "null"]: exchange = "NSE"
 
-    cache_key = f"{token}_{interval}"
+@app.get("/api/candles")
+def get_candles(
+    symbol: str = "NIFTY",
+    token: str = "99926000",
+    exchange: str = "NSE",
+    interval: str = "15",
+):
+    if not symbol or symbol in ("undefined", "null"):
+        symbol = "NIFTY"
+    if not token or token in ("undefined", "null", ""):
+        token = "99926000"
+    if not exchange or exchange in ("undefined", "null", ""):
+        exchange = "NSE"
+
+    # Try to resolve token/exchange from symbol if not provided
+    if token == "99926000" and symbol.upper() != "NIFTY":
+        for s in POPULAR_TOKENS:
+            if s["symbol"].upper() == symbol.upper():
+                token = str(s["token"])
+                exchange = s["exchange"]
+                break
+
+    interval = str(interval)
+    cache_key = f"{exchange}:{token}_{interval}"
     now_ts = time.time()
 
     if cache_key in candle_cache:
@@ -259,15 +358,14 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
         if now_ts - cached_time < 3.0:
             return cached_data
 
-    is_live = smart_api is not None and jwt_token is not None
-
+    is_live = bool(smart_api and jwt_token)
     if is_live:
         try:
             interval_map = {
                 "1": "ONE_MINUTE", "3": "THREE_MINUTE", "5": "FIVE_MINUTE",
-                "15": "FIFTEEN_MINUTE", "30": "THIRTY_MINUTE", "60": "ONE_HOUR", "D": "ONE_DAY"
+                "15": "FIFTEEN_MINUTE", "30": "THIRTY_MINUTE", "60": "ONE_HOUR", "D": "ONE_DAY",
             }
-            smart_int = interval_map.get(str(interval), "FIFTEEN_MINUTE")
+            smart_int = interval_map.get(interval, "FIFTEEN_MINUTE")
             to_date = datetime.now(IST)
             from_date = to_date - timedelta(days=30 if smart_int != "ONE_DAY" else 500)
 
@@ -276,18 +374,20 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
                 "symboltoken": str(token),
                 "interval": smart_int,
                 "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-                "todate": to_date.strftime("%Y-%m-%d %H:%M")
+                "todate": to_date.strftime("%Y-%m-%d %H:%M"),
             })
             if res and isinstance(res, dict) and res.get("status") and res.get("data"):
                 candles = []
                 for c in res["data"]:
-                    # Audit Fix: IST timezone-aware parsing
                     dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                    # Lightweight-charts expects UNIX SECONDS
                     candles.append({
-                        "time": int(dt.timestamp() * 1000),
-                        "open": float(c[1]), "high": float(c[2]),
-                        "low": float(c[3]), "close": float(c[4]),
-                        "volume": int(c[5]) if len(c) > 5 and c[5] else 0
+                        "time": int(dt.timestamp()),
+                        "open": float(c[1]),
+                        "high": float(c[2]),
+                        "low": float(c[3]),
+                        "close": float(c[4]),
+                        "volume": int(c[5]) if len(c) > 5 and c[5] else 0,
                     })
                 if candles:
                     out = {"status": "success", "source": "AngelOne", "candles": candles}
@@ -297,10 +397,9 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
         except Exception as e:
             print(f"⚠️ Candle Fetch Exception: {e}")
 
-    # Audit Fix: Dynamic interval step
-    interval_ms_map = {"1": 60000, "3": 180000, "5": 300000, "15": 900000,
-                       "30": 1800000, "60": 3600000, "D": 86400000}
-    step = interval_ms_map.get(str(interval), 900000)
+    # ---- Fallback: simulated realistic random walk ----
+    interval_ms_map = {"1": 60, "3": 180, "5": 300, "15": 900, "30": 1800, "60": 3600, "D": 86400}
+    step_s = interval_ms_map.get(interval, 900)
 
     base = 22548.16
     for item in POPULAR_TOKENS:
@@ -308,24 +407,38 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
             base = item.get("base", 1500.0)
             break
 
-    start_time = int(time.time() * 1000) - (160 * step)
+    count = 160
+    end_ts = int(datetime.now(IST).timestamp())
+    # align last candle to a round step boundary
+    end_ts = end_ts - (end_ts % step_s)
+    start_time = end_ts - (count - 1) * step_s
+
     candles = []
     p = base
-    for i in range(160):
-        change = (random.random() - 0.48) * (base * 0.0015)
+    for i in range(count):
+        change = (random.random() - 0.5) * (base * 0.0018) * (1 + 0.3 * random.random())
         o = p
         c = o + change
-        h = max(o, c) + random.random() * base * 0.0008
-        l = min(o, c) - random.random() * base * 0.0008
-        v = int(100000 + random.random() * 500000)
+        h = max(o, c) + random.random() * base * 0.0007
+        l = min(o, c) - random.random() * base * 0.0007
+        v = int(100000 + random.random() * 600000)
         candles.append({
-            "time": start_time + i * step,
-            "open": round(o, 2), "high": round(h, 2),
-            "low": round(l, 2), "close": round(c, 2),
-            "volume": v
+            "time": int(start_time + i * step_s),
+            "open": round(o, 2),
+            "high": round(h, 2),
+            "low": round(l, 2),
+            "close": round(c, 2),
+            "volume": v,
         })
         p = c
+
     out = {"status": "success", "source": "SimulatedPro", "candles": candles}
     candle_cache[cache_key] = (now_ts, out)
     cache_cleanup()
     return out
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Bind to loopback only — never expose to LAN/public
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
