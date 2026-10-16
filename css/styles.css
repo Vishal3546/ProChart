@@ -20,6 +20,9 @@
     --radius: 6px;
 }
 html, body { height: 100%; }
+/* Hide LightweightCharts watermark logo on sub-charts */
+.tv-lightweight-charts-watermark,
+[class*="watermark"] { display: none !important; }
 body.dark-theme {
     background: var(--bg-1);
     color: var(--fg-1);

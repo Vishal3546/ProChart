@@ -74,6 +74,7 @@ class TVBridge {
             rightPriceScale: { borderColor: '#2b2b43', borderVisible: true, alignLabels: true },
             timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 5, visible: false },
             handleScroll: { vertTouchDrag: false },
+            watermark: { visible: false },  // hide "TV"/LW logo
             ...extra,
         };
     }

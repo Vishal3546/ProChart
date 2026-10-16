@@ -41,8 +41,10 @@ class App {
         this.searchDebounce = null;
         this.isLiveConnected = false;
         this.source = 'SimulatedPro';
+        this.marketOpen = true;
         this.signalFeed = [];
         this.lastSignalKey = '';
+        this.pollInFlight = false;
     }
 
     async init() {
@@ -317,6 +319,7 @@ class App {
     async checkServerStatus() {
         const s = await this.dataFeed.fetchStatus();
         if (s && s.status === 'online') {
+            this.marketOpen = s.market_open !== false;
             this.setConnectionStatus(!!s.angel_connected, s.angel_connected ? 'AngelOne' : 'SimulatedPro');
             if (!s.angel_connected) {
                 this.toast('Angel One not connected — showing simulated data. Add .env credentials for live feed.', 'warn');
@@ -338,7 +341,10 @@ class App {
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
         const meta = { token: this.activeToken, exchange: this.activeExchange };
-        const { candles, source } = await this.dataFeed.fetchCandles(symbol, tf, meta);
+        const cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
+        const candles = cd.candles;
+        const source = cd.source;
+        if (typeof cd.market_open === 'boolean') this.marketOpen = cd.market_open;
         this.source = source;
         this.setConnectionStatus(source === 'AngelOne', source);
 
@@ -495,40 +501,78 @@ class App {
     }
 
     // --------------- POLLING ---------------
+    _stopPolling() {
+        if (this.pollingInterval) {
+            clearTimeout(this.pollingInterval);
+            this.pollingInterval = null;
+        }
+        this._pollInFlight = false;
+    }
     startLiveQuotePolling() {
-        if (this.pollingInterval) clearInterval(this.pollingInterval);
+        // Guard against double-start (page refresh / symbol switch / init re-runs)
+        this._stopPolling();
+        // Global singleton guard (prevents 2 App instances polling after dev reload)
+        if (window.__prochartPoller && window.__prochartPoller !== this) {
+            try { window.__prochartPoller._stopPolling(); } catch (e) {}
+        }
+        window.__prochartPoller = this;
+
+        // Clean up on page hide (stops in-flight timer before refresh so new page starts clean)
+        window.addEventListener('pagehide', () => this._stopPolling(), { once: true });
+        window.addEventListener('beforeunload', () => this._stopPolling(), { once: true });
+
+        let backoffMs = 0;     // after rate-limit / error, back off
+        const stepSecFor = tf => ({'1':60,'3':180,'5':300,'15':900,'30':1800,'60':3600,'D':86400})[tf] || 900;
+
         const tick = async () => {
-            const meta = { token: this.activeToken, exchange: this.activeExchange };
-            let quote = await this.dataFeed.fetchLiveQuote(this.activeSymbol, meta);
-            const data = this.tvBridge.currentData;
-            if (!data || !data.length) return;
-            const last = data[data.length - 1];
+            if (this._pollInFlight) return;
+            this._pollInFlight = true;
+            try {
+                const meta = { token: this.activeToken, exchange: this.activeExchange };
+                const data = this.tvBridge.currentData;
+                if (!data || !data.length) { return; }
+                const last = data[data.length - 1];
 
-            const stepSec = ({'1':60,'3':180,'5':300,'15':900,'30':1800,'60':3600,'D':86400})[this.activeTimeframe] || 900;
-            const nowSec = Math.floor(Date.now() / 1000);
-            const lastTs = this.tvBridge._toSec(last.time);
-            const newBar = (nowSec - lastTs) >= stepSec;
+                const stepSec = stepSecFor(this.activeTimeframe);
+                const nowSec = Math.floor(Date.now() / 1000);
+                const lastTs = this.tvBridge._toSec(last.time);
+                const newBar = (nowSec - lastTs) >= stepSec;
 
-            if (quote && quote.status && quote.ltp > 0) {
-                if (newBar) {
-                    // Roll new candle
-                    const o = last.close;
-                    data.push({
-                        time: lastTs + stepSec,
-                        open: o, high: quote.ltp, low: quote.ltp, close: quote.ltp,
-                        volume: quote.volume || 0,
-                    });
-                    if (data.length > 500) data.shift();
-                } else {
-                    last.close = quote.ltp;
-                    last.high = Math.max(last.high, quote.ltp);
-                    last.low = Math.min(last.low, quote.ltp);
-                    if (quote.volume) last.volume = quote.volume;
+                let quote = null, moved = false;
+                if (this.isLiveConnected && this.marketOpen) {
+                    quote = await this.dataFeed.fetchLiveQuote(this.activeSymbol, meta);
                 }
-            } else {
-                // Fallback: gentle random walk to keep UI alive (only in simulation)
-                if (this.source === 'SimulatedPro') {
-                    const change = (Math.random() - 0.5) * Math.max(last.close * 0.0008, 0.5);
+
+                // Detect server-side rate-limit → back off
+                if (quote && quote.rate_limited) {
+                    backoffMs = 30000;
+                    quote = null;
+                } else if (!quote || !quote.status) {
+                    // Failure (no data / market closed) → small extra backoff
+                    if (backoffMs < 5000) backoffMs = this.marketOpen ? 5000 : 0;
+                } else {
+                    backoffMs = 0;
+                }
+
+                if (quote && quote.status && quote.ltp > 0) {
+                    if (newBar) {
+                        const o = last.close;
+                        data.push({
+                            time: lastTs + stepSec,
+                            open: o, high: quote.ltp, low: quote.ltp, close: quote.ltp,
+                            volume: quote.volume || 0,
+                        });
+                        if (data.length > 500) data.shift();
+                    } else {
+                        last.close = quote.ltp;
+                        last.high = Math.max(last.high, quote.ltp);
+                        last.low = Math.min(last.low, quote.ltp);
+                        if (quote.volume) last.volume = quote.volume;
+                    }
+                    moved = true;
+                } else if (this.source === 'SimulatedPro' && this.marketOpen) {
+                    // Random walk ONLY when market is open and we're in simulation mode
+                    const change = (Math.random() - 0.5) * Math.max(last.close * 0.0006, 0.3);
                     if (newBar) {
                         const o = last.close;
                         const c = o + change;
@@ -543,25 +587,33 @@ class App {
                         last.high = Math.max(last.high, last.close);
                         last.low = Math.min(last.low, last.close);
                     }
+                    moved = true;
                 }
+                // After market close (or live but no quote): freeze — no random drift.
+
+                const lastCandle = data[data.length - 1];
+                if (moved) this.tvBridge.updateTick(lastCandle);
+
+                const ltp = lastCandle.close;
+                const base = this.prevClose || data[0].open || ltp;
+                const diff = ltp - base;
+                this.lastLtp = ltp;
+                this.updateHeaderPrice(ltp, diff, base);
+
+                if (newBar) this.runAllAnalytics(data);
+            } finally {
+                this._pollInFlight = false;
             }
-
-            const lastCandle = data[data.length - 1];
-            this.tvBridge.updateTick(lastCandle);
-
-            // Update header
-            const ltp = lastCandle.close;
-            const prev = this.prevClose || data[Math.max(0, data.length - 2)].close;
-            const diff = ltp - prev;
-            this.lastLtp = ltp;
-            this.updateHeaderPrice(ltp, diff, prev);
-
-            // Only re-run analytics on new bar (avoids re-scanning every 1.5s)
-            if (newBar) this.runAllAnalytics(data);
         };
-        this.pollingInterval = setInterval(tick, 1500);
-        // First tick quickly
-        setTimeout(tick, 400);
+
+        const schedule = () => {
+            const baseMs = this.marketOpen ? 3000 : 15000;
+            const ms = Math.max(baseMs, backoffMs);
+            this.pollingInterval = setTimeout(async () => { await tick(); schedule(); }, ms);
+        };
+        // First tick after small delay (gives time for candles to load)
+        setTimeout(tick, 1500);
+        schedule();
     }
 
     updateHeaderPrice(ltp, diff, prevClose) {

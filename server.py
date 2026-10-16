@@ -1,5 +1,15 @@
 # ============================================
-# ProChart Terminal™ - Backend v2026.10
+# ProChart Terminal™ - Backend v2026.10 Production
+# Fixes (Oct 2026):
+#  - Bind to 127.0.0.1 only (security hardening)
+#  - CORS tightened to localhost
+#  - Static file serving so a single `uvicorn server:app` serves the UI
+#  - IST timezone aware
+#  - Lifespan API (modern FastAPI)
+#  - Angel One SmartAPI session auto-refresh (23h)
+#  - Quote + Candle endpoints with proper token/exchange routing
+#  - Scrip master download/stream/cache
+#  - Bounded candle cache (no memory leak)
 # ============================================
 
 import os
@@ -18,13 +28,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
+# SmartApi SDK — try both capitalizations; graceful fallback if not installed.
+# smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
 try:
     try:
-        from SmartApi.smartConnect import SmartConnect
+        from SmartApi.smartConnect import SmartConnect  # canonical (1.5.5)
     except ImportError:
-        from SmartApi.smartConnect import SmartConnect
+        from smartapi.smartConnect import SmartConnect  # older / flat wheels
 except ImportError:
     SmartConnect = None
 
@@ -85,6 +97,10 @@ def load_local_scrip_master():
             name = str(s.get("name", ""))
             token = str(s.get("token", ""))
             inst_type = s.get("instrumenttype", "")
+            opt_type = str(s.get("optiontype", ""))
+            expiry = str(s.get("expiry", ""))
+            strike = float(s.get("strike", 0) or 0)
+            lotsize = int(s.get("lotsize", 1) or 1)
 
             if exch in ("NSE", "BSE") and (sym.endswith("-EQ") or inst_type in ("AMXIDX",)):
                 scrip_master.append({
@@ -105,8 +121,12 @@ def load_local_scrip_master():
                     "token": token,
                     "exchange": exch,
                     "type": "OPT_FUT",
+                    "optiontype": opt_type,
+                    "expiry": expiry,
+                    "strike": strike,
+                    "lotsize": lotsize,
                 })
-        print(f"✅ Loaded {len(scrip_master)} Instruments")
+        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT)")
         return True
     except Exception as e:
         print(f"⚠️ Cache read error: {e}")
@@ -127,7 +147,7 @@ def download_scrip_master_stream():
                     if chunk:
                         f.write(chunk)
             os.replace(tmp, SCRIP_FILE)
-            print("✅ Download Complete!")
+            print("✅ Stream Download Complete!")
             load_local_scrip_master()
     except Exception as e:
         print(f"⚠️ Download error: {e}")
@@ -136,10 +156,10 @@ def download_scrip_master_stream():
 def login_smart_api():
     global smart_api, session_data, jwt_token
     if SmartConnect is None:
-        print("⚠️ SmartApi SDK not installed; simulated-only mode.")
+        print("⚠️ SmartApi SDK not installed; running in simulated-only mode.")
         return False
     if not (API_KEY and CLIENT_CODE and PIN and TOTP_SECRET and API_KEY != "your_smartapi_key_here"):
-        print("⚠️ Angel One credentials missing in .env; simulated-only mode.")
+        print("⚠️ Angel One credentials missing in .env; running in simulated-only mode.")
         return False
     try:
         totp = pyotp.TOTP(TOTP_SECRET).now()
@@ -149,16 +169,17 @@ def login_smart_api():
             jwt_token = session_data["data"]["jwtToken"]
             print("✅ Angel One Login SUCCESSFUL!")
             return True
-        print(f"⚠️ Login failed: {session_data}")
+        print(f"⚠️ Angel One login failed: {session_data}")
     except Exception as e:
         print(f"⚠️ Login Error: {e}")
     return False
 
 
 async def session_refresh_task():
+    """Auto re-login every 23 hours to prevent silent 24hr expiry."""
     while True:
         await asyncio.sleep(23 * 3600)
-        print("🔄 Auto-refreshing Angel One session...")
+        print("🔄 Auto-refreshing Angel One Session (23hr cycle)...")
         login_smart_api()
 
 
@@ -174,21 +195,27 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="ProChart Terminal v2026.10", lifespan=lifespan)
+app = FastAPI(title="ProChart Terminal Engine v2026.10", lifespan=lifespan)
 
+# Security: only trust local origins; never `allow_origins=["*"]` with credentials
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8000", "http://127.0.0.1:8000",
-        "http://localhost", "http://127.0.0.1", "null",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost",
+        "http://127.0.0.1",
+        "null",  # for file:// testing
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
+
+# ---------- Static files (serve the UI directly from FastAPI) ----------
 app.mount("/css", StaticFiles(directory=os.path.join(STATIC_DIR, "css")), name="css")
-app.mount("/js",  StaticFiles(directory=os.path.join(STATIC_DIR, "js")),  name="js")
+app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js")
 
 
 @app.get("/")
@@ -196,21 +223,18 @@ def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
-@app.get("/favicon.ico")
-def favicon():
-    f = os.path.join(STATIC_DIR, "favicon.ico")
-    if os.path.exists(f):
-        return FileResponse(f, media_type="image/x-icon")
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"), status_code=204)
-
-
 @app.get("/api/status")
 def status():
+    now_ist = datetime.now(IST)
+    weekday = now_ist.weekday()
+    hhmm = now_ist.hour * 100 + now_ist.minute
+    market_open = (weekday < 5) and (915 <= hhmm < 1530)
     return {
         "status": "online",
         "angel_connected": bool(smart_api and jwt_token),
         "symbols_count": len(scrip_master) or len(POPULAR_TOKENS),
-        "server_time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
+        "market_open": market_open,
     }
 
 
@@ -219,37 +243,59 @@ def search(q: str = ""):
     query = q.strip().upper()
     if not query:
         return {"results": POPULAR_TOKENS}
-    results, seen = [], set()
+
+    results = []
+    seen_tokens = set()
+
     for s in POPULAR_TOKENS:
         if query in s["symbol"].upper() or query in s["name"].upper():
             results.append(s)
-            seen.add(f"{s['exchange']}:{s['token']}")
+            seen_tokens.add(f"{s['exchange']}:{s['token']}")
+
     if scrip_master:
         for s in scrip_master:
             if query in s["symbol_upper"] or query in s["name_upper"]:
                 key = f"{s['exchange']}:{s['token']}"
-                if key in seen:
+                if key in seen_tokens:
                     continue
                 results.append({
-                    "symbol": s["symbol"], "name": s["name"],
-                    "token": s["token"], "exchange": s["exchange"],
+                    "symbol": s["symbol"],
+                    "name": s["name"],
+                    "token": s["token"],
+                    "exchange": s["exchange"],
                     "type": s.get("type", "EQ"),
                 })
-                seen.add(key)
+                seen_tokens.add(key)
                 if len(results) >= 50:
                     break
     return {"results": results}
 
 
+# ---------- Candle cache with TTL + size limit + rate-limit backoff ----------
 candle_cache = {}
+quote_cache = {}
 MAX_CACHE_SIZE = 50
+QUOTE_TTL = 2.5          # quote cache TTL (seconds) — prevents hammering every poll
+CANDLE_TTL = 5.0         # candle cache TTL
+RATE_LIMIT_BACKOFF = 45  # after rate-limit, wait 45s before retrying
+rate_limited_candles = {}
+rate_limited_quotes = {}
 
 
 def cache_cleanup():
+    now = time.time()
     if len(candle_cache) > MAX_CACHE_SIZE:
-        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[:len(candle_cache) - MAX_CACHE_SIZE]
+        oldest = sorted(candle_cache.items(), key=lambda x: x[1][0])[: len(candle_cache) - MAX_CACHE_SIZE]
         for k, _ in oldest:
             del candle_cache[k]
+    if len(quote_cache) > MAX_CACHE_SIZE * 2:
+        oldest_q = sorted(quote_cache.items(), key=lambda x: x[1][0])[: len(quote_cache) - MAX_CACHE_SIZE * 2]
+        for k, _ in oldest_q:
+            del quote_cache[k]
+    for d in (rate_limited_candles, rate_limited_quotes):
+        for k in list(d.keys()):
+            if d[k] < now:
+                del d[k]
 
 
 def _auth_headers():
@@ -268,8 +314,10 @@ def _auth_headers():
 
 @app.get("/api/quote")
 def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
+    """Real-time LTP quote. Accepts exchange+token (preferred) or falls back to symbol lookup."""
     exchange = (exchange or "NSE").strip()
     token = str(token or "").strip()
+
     if not token and symbol:
         for s in POPULAR_TOKENS:
             if s["symbol"].upper() == symbol.upper():
@@ -277,16 +325,42 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
                 break
     if not token:
         return {"status": False, "message": "No token resolved"}
+
+    qkey = f"{exchange}:{token}"
+    now_ts = time.time()
+
+    # Rate-limit backoff: if Angel One blocked us recently, don't hammer
+    if rate_limited_quotes.get(qkey, 0) > now_ts:
+        # Return cache if present, else fail
+        if qkey in quote_cache:
+            ct, cd = quote_cache[qkey]
+            return cd
+        return {"status": False, "message": "Rate limited (backoff)", "rate_limited": True}
+
+    # Serve fresh cached quote if within TTL
+    if qkey in quote_cache:
+        ct, cd = quote_cache[qkey]
+        if now_ts - ct < QUOTE_TTL:
+            return cd
+
     if not jwt_token:
         return {"status": False, "message": "Not logged in"}
+
     try:
         payload = {"mode": "FULL", "exchangeTokens": {exchange: [str(token)]}}
         url = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote/"
         res = requests.post(url, json=payload, headers=_auth_headers(), timeout=10)
+        text = res.text or ""
+        if "Access denied" in text or "exceeding access rate" in text:
+            rate_limited_quotes[qkey] = now_ts + RATE_LIMIT_BACKOFF
+            print(f"⚠️ Quote rate-limited for {qkey}, backoff {RATE_LIMIT_BACKOFF}s")
+            if qkey in quote_cache:
+                return quote_cache[qkey][1]
+            return {"status": False, "message": "Rate limited", "rate_limited": True}
         data = res.json()
         if data.get("status") and data.get("data", {}).get("fetched"):
             q = data["data"]["fetched"][0]
-            return {
+            out = {
                 "status": True,
                 "ltp": float(q.get("ltp", 0) or 0),
                 "open": float(q.get("open", 0) or 0),
@@ -297,41 +371,67 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
                 "netChange": float(q.get("netChange", 0) or 0),
                 "percentChange": float(q.get("percentChange", 0) or 0),
             }
+            quote_cache[qkey] = (now_ts, out)
+            cache_cleanup()
+            return out
     except Exception as e:
         print(f"⚠️ Quote fetch error: {e}")
     return {"status": False, "message": "Fetch failed"}
 
 
 @app.get("/api/candles")
-def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = "NSE", interval: str = "15"):
-    if not symbol or symbol in ("undefined", "null"): symbol = "NIFTY"
-    if not token or token in ("undefined", "null", ""): token = "99926000"
-    if not exchange or exchange in ("undefined", "null", ""): exchange = "NSE"
-    interval = str(interval)
+def get_candles(
+    symbol: str = "NIFTY",
+    token: str = "99926000",
+    exchange: str = "NSE",
+    interval: str = "15",
+):
+    if not symbol or symbol in ("undefined", "null"):
+        symbol = "NIFTY"
+    if not token or token in ("undefined", "null", ""):
+        token = "99926000"
+    if not exchange or exchange in ("undefined", "null", ""):
+        exchange = "NSE"
 
+    # Try to resolve token/exchange from symbol if not provided
     if token == "99926000" and symbol.upper() != "NIFTY":
         for s in POPULAR_TOKENS:
             if s["symbol"].upper() == symbol.upper():
-                token, exchange = str(s["token"]), s["exchange"]
+                token = str(s["token"])
+                exchange = s["exchange"]
                 break
 
+    interval = str(interval)
     cache_key = f"{exchange}:{token}_{interval}"
     now_ts = time.time()
+
+    # Market hours helper (NSE): Mon-Fri 09:15-15:30 IST
+    now_ist = datetime.now(IST)
+    weekday = now_ist.weekday()  # 0=Mon .. 6=Sun
+    hhmm = now_ist.hour * 100 + now_ist.minute
+    market_open = (weekday < 5) and (915 <= hhmm < 1530)
+
+    # Serve cached data with TTL: longer TTL when market is closed or rate-limited
     if cache_key in candle_cache:
-        ct, cd = candle_cache[cache_key]
-        if now_ts - ct < 3.0:
-            return cd
+        cached_time, cached_data = candle_cache[cache_key]
+        ttl = CANDLE_TTL if market_open else 999999  # after close, freeze forever
+        if rate_limited_candles.get(cache_key, 0) > now_ts:
+            return cached_data  # during backoff always serve cache
+        if now_ts - cached_time < ttl:
+            return cached_data
 
     is_live = bool(smart_api and jwt_token)
-    if is_live:
+    live_ok = False
+    if is_live and rate_limited_candles.get(cache_key, 0) <= now_ts:
         try:
             interval_map = {
                 "1": "ONE_MINUTE", "3": "THREE_MINUTE", "5": "FIVE_MINUTE",
                 "15": "FIFTEEN_MINUTE", "30": "THIRTY_MINUTE", "60": "ONE_HOUR", "D": "ONE_DAY",
             }
             smart_int = interval_map.get(interval, "FIFTEEN_MINUTE")
-            to_date = datetime.now(IST)
+            to_date = now_ist
             from_date = to_date - timedelta(days=30 if smart_int != "ONE_DAY" else 500)
+
             res = smart_api.getCandleData({
                 "exchange": exchange,
                 "symboltoken": str(token),
@@ -339,6 +439,17 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
                 "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
                 "todate": to_date.strftime("%Y-%m-%d %H:%M"),
             })
+            err_msg = ""
+            if isinstance(res, dict) and not res.get("status"):
+                err_msg = str(res.get("message", ""))
+            # Detect plain-string rate-limit (SmartApi sometimes returns raw string)
+            if isinstance(res, str) and ("Access denied" in res or "exceeding access rate" in res):
+                err_msg = res
+            if "Access denied" in err_msg or "exceeding access rate" in err_msg:
+                rate_limited_candles[cache_key] = now_ts + RATE_LIMIT_BACKOFF
+                print(f"⚠️ Candle rate-limited for {cache_key}, backoff {RATE_LIMIT_BACKOFF}s")
+                if cache_key in candle_cache:
+                    return candle_cache[cache_key][1]
             if res and isinstance(res, dict) and res.get("status") and res.get("data"):
                 candles = []
                 for c in res["data"]:
@@ -355,18 +466,37 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
                             "open": o, "high": h, "low": l, "close": cl,
                             "volume": vol,
                         })
-                    except Exception:
+                    except (ValueError, TypeError, IndexError):
                         continue
                 if candles:
-                    out = {"status": "success", "source": "AngelOne", "candles": candles}
+                    out = {"status": "success", "source": "AngelOne", "candles": candles,
+                           "market_open": market_open}
                     candle_cache[cache_key] = (now_ts, out)
                     cache_cleanup()
+                    live_ok = True
                     return out
         except Exception as e:
+            msg = str(e)
+            if "Access denied" in msg or "exceeding access rate" in msg:
+                rate_limited_candles[cache_key] = now_ts + RATE_LIMIT_BACKOFF
+                print(f"⚠️ Candle rate-limit (exception) for {cache_key}: {msg}")
+                if cache_key in candle_cache:
+                    return candle_cache[cache_key][1]
             print(f"⚠️ Candle Fetch Exception: {e}")
+
+    # ---- Fallback: simulated realistic random walk ----
+    # When market is closed or we already have a cached simulated snapshot, keep serving that
+    # (no random jitter after hours — matches "frozen close" expectation).
+    if cache_key in candle_cache:
+        cached_time, cached_data = candle_cache[cache_key]
+        # If cached and market closed / rate limited / live failed → reuse
+        if cached_data and cached_data.get("candles"):
+            if not market_open or cached_data.get("source") == "SimulatedPro":
+                return cached_data
 
     interval_ms_map = {"1": 60, "3": 180, "5": 300, "15": 900, "30": 1800, "60": 3600, "D": 86400}
     step_s = interval_ms_map.get(interval, 900)
+
     base = 22548.16
     for item in POPULAR_TOKENS:
         if item["symbol"].upper() == symbol.upper():
@@ -374,33 +504,94 @@ def get_candles(symbol: str = "NIFTY", token: str = "99926000", exchange: str = 
             break
 
     count = 160
-    end_ts = int(datetime.now(IST).timestamp())
+    end_ts = int(now_ts)
     end_ts = end_ts - (end_ts % step_s)
     start_time = end_ts - (count - 1) * step_s
 
+    # When market is closed, produce a frozen close bar instead of random drift
+    jitter = market_open  # True = random walk, False = flat at base
     candles = []
     p = base
     for i in range(count):
-        change = (random.random() - 0.5) * (base * 0.0018) * (1 + 0.3 * random.random())
+        if jitter:
+            change = (random.random() - 0.5) * (base * 0.0018) * (1 + 0.3 * random.random())
+        else:
+            change = 0
         o = p
         c = o + change
-        h = max(o, c) + random.random() * base * 0.0007
-        l = min(o, c) - random.random() * base * 0.0007
-        v = int(100000 + random.random() * 600000)
+        if jitter:
+            h = max(o, c) + random.random() * base * 0.0007
+            l = min(o, c) - random.random() * base * 0.0007
+        else:
+            h = max(o, c) + base * 0.0001
+            l = min(o, c) - base * 0.0001
+        v = int(100000 + (random.random() * 600000 if jitter else 0))
         candles.append({
             "time": int(start_time + i * step_s),
-            "open": round(o, 2), "high": round(h, 2),
-            "low": round(l, 2), "close": round(c, 2),
+            "open": round(o, 2),
+            "high": round(h, 2),
+            "low": round(l, 2),
+            "close": round(c, 2),
             "volume": v,
         })
         p = c
 
-    out = {"status": "success", "source": "SimulatedPro", "candles": candles}
+    out = {"status": "success", "source": "SimulatedPro", "candles": candles,
+           "market_open": market_open}
     candle_cache[cache_key] = (now_ts, out)
     cache_cleanup()
     return out
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    import uvicorn, logging, sys, signal, threading
+    # On Windows, force SelectorEventLoop to avoid ProactorPipeTransport stack traces
+    if sys.platform == "win32":
+        import asyncio
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except Exception:
+            pass
+    # Suppress noisy asyncio/uvicorn tracebacks (browser disconnect = normal)
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    for _log in ("uvicorn.error", "uvicorn.access", "uvicorn"):
+        logging.getLogger(_log).handlers = []  # reset; let uvicorn configure
+
+    # Quiet ConnectionResetError spam on Windows proactor fallback
+    def _quiet_asyncio_exc(loop, ctx):
+        msg = ctx.get("message", "")
+        exc = ctx.get("exception")
+        if isinstance(exc, ConnectionResetError):
+            return
+        if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10054:
+            return
+        loop.default_exception_handler(ctx)
+    try:
+        loop = asyncio.new_event_loop()
+        loop.set_exception_handler(_quiet_asyncio_exc)
+        asyncio.set_event_loop(loop)
+    except Exception:
+        pass
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="info",
+                            loop="asyncio", access_log=True)
+    server = uvicorn.Server(config)
+
+    # Ensure clean Ctrl+C shutdown on Windows
+    def _shutdown(*_a):
+        if server.started and not server.should_exit:
+            server.should_exit = True
+            # Force exit after 4s if graceful hang
+            def _force_exit():
+                import time as _t
+                _t.sleep(4)
+                os._exit(0)
+            threading.Thread(target=_force_exit, daemon=True).start()
+    signal.signal(signal.SIGINT, _shutdown)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _shutdown)
+
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        os._exit(0)
