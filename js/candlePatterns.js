@@ -1,38 +1,52 @@
 class CandlePatternEngine {
-    constructor() { this.detectedPatterns = []; }
-    bodySize(c) { return Math.abs(c.close - c.open); }
-    totalRange(c) { return c.high - c.low || 0.0001; }
-    isBullish(c) { return c.close > c.open; }
-    isBearish(c) { return c.close < c.open; }
-    isDoji(c) { return this.bodySize(c) / this.totalRange(c) < 0.05; }
-    
-    scanAll(candles, minAccuracy = 60) {
-        this.detectedPatterns = [];
-        if (candles.length < 5) return this.detectedPatterns;
+    isDowntrend(candles, idx) {
+        if (idx < 5) return false;
+        return candles[idx].close < candles[idx-5].close;
+    }
 
-        for (let i = 1; i < candles.length; i++) {
-            const c = candles[i];
-            const prev = candles[i - 1];
+    isUptrend(candles, idx) {
+        if (idx < 5) return false;
+        return candles[idx].close > candles[idx-5].close;
+    }
 
-            // Hammer
-            if (c.high - Math.max(c.open, c.close) <= this.totalRange(c) * 0.15 &&
-                Math.min(c.open, c.close) - c.low >= this.bodySize(c) * 2) {
-                this.detectedPatterns.push({
-                    type: 'single', name: 'Hammer', signal: 'bullish', index: i, accuracy: 82,
-                    description: 'Bullish reversal. Rejection of lower prices.'
+    scanAll(candles) {
+        const patterns = [];
+        if (!candles || candles.length < 5) return patterns;
+
+        for (let i = 5; i < candles.length; i++) {
+            const c = candles[i], p = candles[i-1];
+            const cBody = Math.abs(c.close - c.open);
+            const cRange = c.high - c.low;
+            const pBody = Math.abs(p.close - p.open);
+            const lWick = Math.min(c.open, c.close) - c.low;
+
+            // Hammer with downtrend check
+            if (this.isDowntrend(candles, i) && cRange > 0 &&
+                cBody < cRange * 0.3 && lWick > cBody * 2) {
+                patterns.push({
+                    index: i, name: 'Hammer', signal: 'bullish',
+                    accuracy: 78, description: 'Bullish reversal after downtrend'
                 });
             }
 
-            // Engulfing
-            if (i >= 1) {
-                if (this.isBearish(prev) && this.isBullish(c) && c.open <= prev.close && c.close >= prev.open) {
-                    this.detectedPatterns.push({
-                        type: 'double', name: 'Bullish Engulfing', signal: 'bullish', index: i, accuracy: 86,
-                        description: 'Strong bullish reversal. Buyers engulf sellers.'
-                    });
-                }
+            // Bullish Engulfing with downtrend check
+            if (this.isDowntrend(candles, i) && p.close < p.open && c.close > c.open &&
+                c.close > p.open && c.open < p.close && cBody > pBody * 1.3) {
+                patterns.push({
+                    index: i, name: 'Bullish Engulfing', signal: 'bullish',
+                    accuracy: 85, description: 'Strong bullish reversal'
+                });
+            }
+
+            // Bearish Engulfing
+            if (this.isUptrend(candles, i) && p.close > p.open && c.close < c.open &&
+                c.close < p.open && c.open > p.close && cBody > pBody * 1.3) {
+                patterns.push({
+                    index: i, name: 'Bearish Engulfing', signal: 'bearish',
+                    accuracy: 85, description: 'Strong bearish reversal'
+                });
             }
         }
-        return this.detectedPatterns.filter(p => p.accuracy >= minAccuracy);
+        return patterns;
     }
 }

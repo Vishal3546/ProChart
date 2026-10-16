@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ProChart Terminal™ - TradingView Powered</title>
+    <title>ProChart Terminal™ v2026</title>
     <link rel="stylesheet" href="css/styles.css">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-    <!-- TRADINGVIEW LIGHTWEIGHT CHARTS CDN -->
-    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- TradingView Lightweight Charts v5.2.1 LATEST (Oct 2026) -->
+    <script src="https://unpkg.com/lightweight-charts@5.2.1/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div id="splashScreen" class="splash-screen">
@@ -16,26 +16,22 @@
             <div class="splash-logo">
                 <div class="logo-icon"><i class="fas fa-chart-line"></i></div>
                 <h1>ProChart Terminal™</h1>
-                <p>Loading TradingView Engine & Pro Analytics...</p>
+                <p>Loading TradingView v5.2.1 Engine...</p>
             </div>
         </div>
     </div>
 
     <div id="app" class="app-container" style="display:none;">
-        
-        <!-- TOP NAVBAR -->
         <nav class="top-navbar">
             <div class="nav-left">
                 <div class="logo"><i class="fas fa-chart-line"></i><span>ProChart<sup>™</sup></span></div>
-                <div class="symbol-selector">
-                    <button id="symbolBtn" class="symbol-btn" title="Search Stocks & Indices">
-                        <span class="symbol-name" id="topSymbolName">NIFTY 50</span>
-                        <span class="symbol-price up" id="topSymbolPrice">0.00</span>
-                        <span class="symbol-change up" id="topSymbolChange">0.00%</span>
-                        <i class="fas fa-search" style="margin-left:8px; opacity:0.7"></i>
-                    </button>
-                </div>
-                <div class="timeframe-selector" id="timeframeSelector">
+                <button id="symbolBtn" class="symbol-btn">
+                    <span class="symbol-name" id="topSymbolName">NIFTY</span>
+                    <span class="symbol-price up" id="topSymbolPrice">0.00</span>
+                    <span class="symbol-change up" id="topSymbolChange">0.00%</span>
+                    <i class="fas fa-search" style="margin-left:8px;opacity:0.7"></i>
+                </button>
+                <div class="timeframe-selector">
                     <button class="tf-btn" data-tf="1">1m</button>
                     <button class="tf-btn" data-tf="3">3m</button>
                     <button class="tf-btn" data-tf="5">5m</button>
@@ -51,152 +47,102 @@
             </div>
         </nav>
 
-        <!-- MAIN WORKSPACE -->
         <div class="main-content">
-            
-            <!-- TRADINGVIEW CHART AREA -->
-            <div class="chart-wrapper" style="position: relative; flex: 1; background: #131722;">
-                <!-- This div is where TradingView will inject its magic -->
-                <div id="tvchart" style="width: 100%; height: 100%;"></div>
+            <div class="chart-wrapper" style="position:relative;flex:1;background:#131722;">
+                <div class="tv-legend-overlay" id="tvLegendOverlay">
+                    <div class="leg-row title"><b id="legSymbol">NIFTY</b> <span id="legTF">15m</span></div>
+                    <div id="legIndicators" class="leg-indicators"></div>
+                </div>
+                <div id="mainTvChart" style="width:100%;height:100%;position:relative;"></div>
             </div>
 
-            <!-- RIGHT ANALYTICS PANEL (ALL YOUR PRO FEATURES PRESERVED) -->
-            <div class="right-panel" id="rightPanel">
-                
-                <!-- MASTER PRO DASHBOARD -->
+            <div class="right-panel">
                 <div class="panel-section">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-crown" style="color:#ffd740"></i> Master Pro Dashboard</h3>
-                    </div>
+                    <div class="panel-header"><h3><i class="fas fa-crown" style="color:#ffd740"></i> Master Pro Dashboard</h3></div>
                     <div class="panel-body">
-                        <div class="pro-card">
-                            <div class="card-title">BOLLINGER SQUEEZE</div>
-                            <div id="bbStatusText" class="card-val" style="color:var(--accent-cyan);">Scanning...</div>
-                            <div id="bbDetailText" class="card-sub">-</div>
-                        </div>
-                        <div class="pro-card">
-                            <div class="card-title">WYCKOFF VSA (VOLUME FUEL)</div>
-                            <div id="vsaStatusText" class="card-val" style="color:var(--bull-color);">Analyzing...</div>
-                            <div id="vsaDetailText" class="card-sub">-</div>
-                        </div>
-                        <div class="pro-card">
-                            <div class="card-title">MACD DECELERATION</div>
-                            <div id="macdDecelText" class="card-val" style="color:var(--accent-orange);">Tracking...</div>
-                        </div>
+                        <div class="pro-card"><div class="card-title">BOLLINGER SQUEEZE</div><div id="bbStatusText" class="card-val">Scanning...</div></div>
+                        <div class="pro-card"><div class="card-title">WYCKOFF VSA</div><div id="vsaStatusText" class="card-val">Analyzing...</div></div>
+                        <div class="pro-card"><div class="card-title">MACD DECELERATION</div><div id="macdDecelText" class="card-val">Tracking...</div></div>
                     </div>
                 </div>
 
-                <!-- OPTIONS GREEKS PANEL -->
                 <div class="panel-section">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-atom" style="color:#2196f3"></i> Options Greeks</h3>
-                    </div>
+                    <div class="panel-header"><h3><i class="fas fa-atom" style="color:#2196f3"></i> Options Greeks</h3></div>
                     <div class="panel-body">
                         <div class="greeks-inputs">
                             <div class="input-group"><input type="number" id="greekStrike" placeholder="Strike"></div>
                             <div class="input-group"><select id="greekType"><option value="CE">CE</option><option value="PE">PE</option></select></div>
                             <div class="input-group"><input type="number" id="greekIV" value="18" step="0.5"></div>
                         </div>
-
                         <div class="greeks-display">
-                            <div class="greek-card delta"><div class="greek-symbol">Δ</div><div id="gDelta">0.00</div></div>
-                            <div class="greek-card gamma"><div class="greek-symbol">Γ</div><div id="gGamma">0.00</div></div>
-                            <div class="greek-card theta"><div class="greek-symbol">Θ</div><div id="gTheta">0.00</div></div>
-                            <div class="greek-card vega"><div class="greek-symbol">ν</div><div id="gVega">0.00</div></div>
+                            <div class="greek-card"><div class="greek-symbol">Δ</div><div id="gDelta">0.00</div></div>
+                            <div class="greek-card"><div class="greek-symbol">Γ</div><div id="gGamma">0.00</div></div>
+                            <div class="greek-card"><div class="greek-symbol">Θ</div><div id="gTheta">0.00</div></div>
+                            <div class="greek-card"><div class="greek-symbol">ν</div><div id="gVega">0.00</div></div>
                         </div>
                     </div>
                 </div>
 
-                <!-- BREAKOUT CHECKLIST -->
                 <div class="panel-section">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-tasks"></i> 6-Point Breakout Checklist</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div id="breakoutStatusBox" class="breakout-box">Checking...</div>
-                    </div>
+                    <div class="panel-header"><h3><i class="fas fa-tasks"></i> 6-Point Breakout Checklist</h3></div>
+                    <div class="panel-body"><div id="breakoutStatusBox" class="breakout-box">Checking...</div></div>
                 </div>
 
-                <!-- VCP & CLOSING TRAP -->
                 <div class="panel-section">
-                    <div class="panel-header">
-                        <h3><i class="fas fa-chart-line"></i> VCP & 3:25 PM Trap</h3>
-                    </div>
+                    <div class="panel-header"><h3><i class="fas fa-chart-line"></i> VCP & 3:25 PM Trap</h3></div>
                     <div class="panel-body">
-                        <div class="pro-card">
-                            <div class="card-title">MINERVINI VCP</div>
-                            <div id="vcpStatusText" class="card-val" style="color:var(--bull-color);">Scanning...</div>
-                        </div>
-                        <div class="pro-card">
-                            <div class="card-title">3:25 PM CLOSING TRAP</div>
-                            <div id="btstSignalText" class="card-val" style="color:var(--accent-gold);">Analyzing...</div>
-                        </div>
+                        <div class="pro-card"><div class="card-title">MINERVINI VCP (REAL)</div><div id="vcpStatusText" class="card-val">Scanning...</div></div>
+                        <div class="pro-card"><div class="card-title">3:25 PM CLOSING TRAP (Time-Gated)</div><div id="btstSignalText" class="card-val">Analyzing...</div></div>
                     </div>
                 </div>
-
             </div>
         </div>
 
-        <!-- STATUS BAR -->
         <div class="status-bar">
             <div class="sb-left">
-                <span class="sb-item"><i class="fas fa-circle" style="color:#00c853;font-size:8px"></i> Angel One Live</span>
+                <span class="sb-item" id="sbMarketStatus"><i class="fas fa-circle" style="color:#00c853;font-size:8px"></i> Live</span>
                 <span class="sb-item" id="sbTime"></span>
             </div>
-            <div class="sb-right">
-                <span class="sb-item">TradingView Engine Active</span>
-            </div>
+            <div class="sb-right"><span class="sb-item">v5.2.1 Engine | Real LTP Polling</span></div>
         </div>
 
-        <!-- SEARCH SYMBOL MODAL -->
         <div class="modal-overlay" id="symbolModal" style="display:none;">
             <div class="modal">
                 <div class="modal-header">
-                    <h2><i class="fas fa-search"></i> Search Stocks</h2>
+                    <h2><i class="fas fa-search"></i> Search Stocks & Options</h2>
                     <button class="modal-close" id="closeSymbolModal"><i class="fas fa-times"></i></button>
                 </div>
                 <div class="modal-body">
                     <div class="search-input-wrapper">
                         <i class="fas fa-search"></i>
-                        <input type="text" id="symbolSearchInput" placeholder="Search Nifty, Reliance, Tata...">
+                        <input type="text" id="symbolSearchInput" placeholder="Search PRAKASH, NIFTY24NOV25000CE, RELIANCE...">
                     </div>
                     <div id="symbolList" class="modal-list"></div>
                 </div>
             </div>
         </div>
         
-        <!-- INDICATOR MODAL -->
         <div class="modal-overlay" id="indicatorModal" style="display:none;">
             <div class="modal">
                 <div class="modal-header">
                     <h2><i class="fas fa-wave-square"></i> Indicators</h2>
                     <button class="modal-close" id="closeIndicatorModal"><i class="fas fa-times"></i></button>
                 </div>
-                <div class="modal-body">
-                    <div id="indicatorList" class="modal-list"></div>
-                </div>
+                <div class="modal-body"><div id="indicatorList" class="modal-list"></div></div>
             </div>
         </div>
 
         <div class="toast-container" id="toastContainer"></div>
     </div>
 
-    <!-- YOUR ENGINES (NOTHING REMOVED) -->
-    <script src="js/candlePatterns.js"></script>
     <script src="js/indicators.js"></script>
+    <script src="js/candlePatterns.js"></script>
     <script src="js/greeksEngine.js"></script>
-    <script src="js/divergenceEngine.js"></script>
-    <script src="js/flagPatternEngine.js"></script>
-    <script src="js/preMarketEngine.js"></script>
-    <script src="js/doubleBottomEngine.js"></script>
+    <script src="js/masterProEngine.js"></script>
     <script src="js/breakoutChecklistEngine.js"></script>
-    <script src="js/orderFlowAbsorptionEngine.js"></script>
     <script src="js/vcpPatternEngine.js"></script>
     <script src="js/closingTrapEngine.js"></script>
-    <script src="js/masterProEngine.js"></script>
     <script src="js/dataFeed.js"></script>
-    
-    <!-- NEW TRADINGVIEW BRIDGE -->
     <script src="js/tvBridge.js"></script>
     <script src="js/app.js"></script>
 </body>
