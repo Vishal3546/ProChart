@@ -77,35 +77,51 @@ class TVBridge {
         });
 
         // 1) Main candlestick pane
+        // =========================================================
+        // Proper TradingView-style stacked panes (non-overlapping)
+        // Heights: Candles 47% | Volume 12% | RSI 16% | MACD 18%
+        // scaleMargins: top=%from top of chart to pane-top,
+        //               bottom=%from bottom of chart to pane-bottom.
+        // =========================================================
+
+        // 1) Main candlestick pane (top — 53% down)
         this.mainSeries = this.chart.addSeries(LightweightCharts.CandlestickSeries, {
             upColor: '#089981', downColor: '#f23645',
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
+            priceScaleId: 'right',
         });
         this.chart.priceScale('right').applyOptions({
-            scaleMargins: { top: 0.02, bottom: 0.52 },
+            scaleMargins: { top: 0.05, bottom: 0.48 },
             borderColor: '#2b2b43',
             autoScale: true,
+            borderVisible: true,
+            alignLabels: true,
         });
 
-        // 2) Volume (overlaid on main pane area, its own scale)
+        // 2) Volume pane (52% – 64% from top)
         this.volumeSeries = this.chart.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: { type: 'volume' },
             priceScaleId: 'vol',
         });
         this.chart.priceScale('vol').applyOptions({
-            scaleMargins: { top: 0.78, bottom: 0.0 },
-            visible: false,
+            scaleMargins: { top: 0.52, bottom: 0.36 },
+            visible: true,
+            borderVisible: true,
+            borderColor: '#2b2b43',
+            alignLabels: false,
         });
 
-        // 3) RSI pane
+        // 3) RSI pane (64% – 80% from top)
         this.rsiSeries = this.chart.addSeries(LightweightCharts.LineSeries, {
             color: '#9c27b0', lineWidth: 2,
             priceScaleId: 'rsi',
         });
         this.chart.priceScale('rsi').applyOptions({
-            scaleMargins: { top: 0.72, bottom: 0.12 },
+            scaleMargins: { top: 0.64, bottom: 0.20 },
             visible: true,
             borderColor: '#2b2b43',
+            borderVisible: true,
+            alignLabels: true,
         });
         try {
             this.rsiSeries.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
@@ -222,8 +238,11 @@ class TVBridge {
 
         try {
             this.chart.priceScale('macd').applyOptions({
-                scaleMargins: { top: 0.88, bottom: 0.00 },
-                visible: true, borderColor: '#2b2b43',
+                scaleMargins: { top: 0.80, bottom: 0.02 },
+                visible: true,
+                borderColor: '#2b2b43',
+                borderVisible: true,
+                alignLabels: true,
             });
         } catch (e) {}
 

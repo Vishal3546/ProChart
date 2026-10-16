@@ -163,9 +163,34 @@ class App {
     bindGreeksUI() {
         const btn = document.getElementById('greekCalcBtn');
         if (!btn) return;
+
+        // Strike step-size per underlying (proper ATM rounding)
+        this._strikeStep = () => {
+            const s = (this.activeSymbol || '').toUpperCase();
+            if (s === 'BANKNIFTY') return 100;
+            if (s === 'FINNIFTY') return 50;
+            if (s === 'MIDCPNIFTY') return 25;
+            if (s === 'SENSEX') return 100;
+            if (s === 'NIFTY') return 50;
+            return 0; // equities → nearest rupee = spot
+        };
+        this._atmStrike = (spot) => {
+            if (!spot || spot <= 0) return spot;
+            const step = this._strikeStep();
+            if (step <= 0) return Math.round(spot);
+            return Math.round(spot / step) * step;
+        };
+
         const calc = () => {
             const spot = parseFloat(document.getElementById('greekSpot')?.value) || this.lastLtp || 22668;
-            const strike = parseFloat(document.getElementById('greekStrike')?.value) || 22650;
+            // Auto-snap strike to ATM unless user manually overrode
+            const strikeEl = document.getElementById('greekStrike');
+            let strike = parseFloat(strikeEl?.value);
+            const autoMode = !strikeEl || strikeEl.dataset.auto !== '0';
+            if (!strike || autoMode) {
+                strike = this._atmStrike(spot);
+                if (strikeEl) { strikeEl.value = strike; strikeEl.dataset.auto = '1'; }
+            }
             const type = document.getElementById('greekType')?.value || 'CE';
             const iv = parseFloat(document.getElementById('greekIv')?.value) || 18;
             const dte = parseFloat(document.getElementById('greekDte')?.value) || 7;
@@ -178,9 +203,21 @@ class App {
             set('greekRho', g.rho.toFixed(3));
             set('greekIvDisp', g.iv_pct.toFixed(1) + '%');
             // Keep spot in sync with LTP
-            if (this.lastLtp > 0) document.getElementById('greekSpot').value = this.lastLtp.toFixed(2);
+            if (this.lastLtp > 0) {
+                const sp = document.getElementById('greekSpot');
+                if (sp) sp.value = this.lastLtp.toFixed(2);
+                if (strikeEl && strikeEl.dataset.auto !== '0') {
+                    strikeEl.value = this._atmStrike(this.lastLtp);
+                }
+            }
         };
         btn.addEventListener('click', calc);
+        // Mark strike as manual when user edits it
+        if (document.getElementById('greekStrike')) {
+            document.getElementById('greekStrike').addEventListener('input', (e) => {
+                e.target.dataset.auto = '0';
+            });
+        }
         ['greekSpot','greekStrike','greekType','greekIv','greekDte'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', calc);
