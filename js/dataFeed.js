@@ -70,11 +70,15 @@ class DataFeed {
     async search(q) {
         try {
             const url = `${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`;
-            const res = await fetch(url);
+            const res = await fetch(url, { cache: 'no-store' });
             if (!res.ok) return [];
             const data = await res.json();
-            return Array.isArray(data.results) ? data.results : [];
-        } catch (e) { return []; }
+            return {
+                results: Array.isArray(data.results) ? data.results : [],
+                loaded: data.loaded !== false,
+                message: data.message || '',
+            };
+        } catch (e) { return { results: [], loaded: false, message: 'Search error' }; }
     }
 
     formatCandles(rawCandles) {

@@ -246,18 +246,21 @@ class App {
         if (!drop) return;
         const q = (query || '').trim();
         if (q.length < 1) {
-            // Show popular list on focus with empty query
-            const popular = await this.dataFeed.search('');
+            const data = await this.dataFeed.search('');
             drop.style.display = 'block';
-            drop.innerHTML = this._renderSearchResults(popular, 'Popular');
+            drop.innerHTML = this._renderSearchResults(data.results || [], 'Popular');
             return;
         }
-        if (q.length < 2) { drop.style.display = 'none'; return; }
 
         drop.style.display = 'block';
         drop.innerHTML = `<div class="dropdown-item text-muted"><i class="fa-solid fa-spinner fa-spin"></i> Searching…</div>`;
 
-        const results = await this.dataFeed.search(q);
+        const data = await this.dataFeed.search(q);
+        const results = data.results || [];
+        if (!data.loaded && !results.length) {
+            drop.innerHTML = `<div class="dropdown-item text-muted"><i class="fa-solid fa-spinner fa-spin"></i> Loading stock list (first run may take 30-60s)…</div>`;
+            return;
+        }
         drop.innerHTML = this._renderSearchResults(results, `Results for "${q}"`, q);
     }
     _renderSearchResults(list, header, query = '') {

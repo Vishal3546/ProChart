@@ -19,6 +19,7 @@ import asyncio
 import socket
 import uuid
 import random
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,17 @@ from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, Response
+
+# Professional scrip master loader (streaming download w/ progress, atomic save, daily 8:45 AM IST refresh)
+from scrip_loader import (
+    start_background_tasks as start_scrip_background,
+    refresh_master as refresh_scrip_master,
+    search as scrip_search,
+    ready as scrip_ready,
+    count as scrip_count,
+    INDEX_FILE as SCRIP_INDEX_FILE,
+    SCRIP_FILE as SCRIP_RAW_FILE,
+)
 
 # SmartApi SDK — try both capitalizations; graceful fallback if not installed.
 # smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
@@ -52,10 +64,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 smart_api = None
 session_data = None
 jwt_token = None
-scrip_master = []
-SCRIP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripMaster.json")
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Popular / featured tokens — only used as candle-simulation fallback & empty-query popular list
 POPULAR_TOKENS = [
     {"symbol": "NIFTY",     "name": "NIFTY 50 INDEX",         "token": "99926000", "exchange": "NSE", "base": 22548.16},
     {"symbol": "BANKNIFTY", "name": "BANK NIFTY INDEX",       "token": "99926009", "exchange": "NSE", "base": 48200.50},
@@ -97,97 +108,6 @@ def get_mac():
     return ":".join("{:02x}".format((uuid.getnode() >> i) & 0xff) for i in range(0, 48, 8))[::-1]
 
 
-SCRIP_FILE_MAX_AGE_DAYS = 1  # redownload scrip master daily (catches demergers/name changes)
-
-def load_local_scrip_master():
-    global scrip_master
-    if not os.path.exists(SCRIP_FILE):
-        return False
-    # Auto-refresh if file older than 1 day
-    try:
-        age_days = (time.time() - os.path.getmtime(SCRIP_FILE)) / 86400.0
-        if age_days > SCRIP_FILE_MAX_AGE_DAYS:
-            print(f"ℹ️ ScripMaster is {age_days:.1f} days old, will refresh...")
-            return False
-    except Exception:
-        pass
-    try:
-        with open(SCRIP_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        scrip_master = []
-        # List of known demerged/delisted symbols to exclude (post-2024 corporate actions)
-        BLOCKED_SYMS = {"TATAMOTORS", "TATAMTRDVR"}
-        for s in raw:
-            exch = s.get("exch_seg", "")
-            sym_raw = str(s.get("symbol", ""))
-            name = str(s.get("name", ""))
-            token = str(s.get("token", ""))
-            inst_type = s.get("instrumenttype", "")
-            opt_type = str(s.get("optiontype", ""))
-            expiry = str(s.get("expiry", ""))
-            strike = float(s.get("strike", 0) or 0)
-            lotsize = int(s.get("lotsize", 1) or 1)
-            asas = str(s.get("asas", ""))  # sometimes AS/BE/IL/ST (suspended)
-
-            if exch in ("NSE", "BSE") and (sym_raw.endswith("-EQ") or inst_type in ("AMXIDX",)):
-                sym = sym_raw.replace("-EQ", "")
-                if sym.upper() in BLOCKED_SYMS:
-                    continue
-                # Skip suspended / illiquid (ST/BE/IL marked)
-                if asas in ("ST", "BE", "IL") and inst_type != "AMXIDX":
-                    continue
-                scrip_master.append({
-                    "symbol": sym,
-                    "symbol_upper": sym.upper(),
-                    "name_upper": name.upper(),
-                    "name": name,
-                    "token": token,
-                    "exchange": "NSE" if inst_type == "AMXIDX" and exch == "NSE" else exch,
-                    "type": "INDEX" if inst_type == "AMXIDX" else "EQ",
-                })
-            elif exch in ("NFO", "BFO", "MCX", "CDS"):
-                scrip_master.append({
-                    "symbol": sym_raw,
-                    "symbol_upper": sym_raw.upper(),
-                    "name_upper": name.upper(),
-                    "name": name,
-                    "token": token,
-                    "exchange": exch,
-                    "type": "OPT_FUT",
-                    "optiontype": opt_type,
-                    "expiry": expiry,
-                    "strike": strike,
-                    "lotsize": lotsize,
-                })
-        # Sort EQs alphabetically so prefix matches bubble up early
-        scrip_master.sort(key=lambda x: (0 if x["type"] == "INDEX" else 1, x["symbol_upper"]))
-        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT, auto-refresh daily)")
-        return True
-    except Exception as e:
-        print(f"⚠️ Cache read error: {e}")
-        return False
-
-
-def download_scrip_master_stream():
-    global scrip_master
-    print("📥 Downloading Angel One Scrip Master...")
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    url = "https://margincalculator.angelone.in/OpenAPI_Data/files/OpenAPIScripMaster.json"
-    try:
-        res = requests.get(url, headers=headers, stream=True, timeout=120)
-        if res.status_code == 200:
-            tmp = SCRIP_FILE + ".tmp"
-            with open(tmp, "wb") as f:
-                for chunk in res.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-            os.replace(tmp, SCRIP_FILE)
-            print("✅ Stream Download Complete!")
-            load_local_scrip_master()
-    except Exception as e:
-        print(f"⚠️ Download error: {e}")
-
-
 def login_smart_api():
     global smart_api, session_data, jwt_token
     if SmartConnect is None:
@@ -220,17 +140,13 @@ async def session_refresh_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Delete very old / pre-refresh scrip master so we download fresh (catches demergers)
-    if os.path.exists(SCRIP_FILE):
-        try:
-            age_days = (time.time() - os.path.getmtime(SCRIP_FILE)) / 86400.0
-            if age_days > 2:
-                os.remove(SCRIP_FILE)
-                print("🗑️  Removed old scripMaster.json (>2 days old) — re-downloading for latest instruments.")
-        except Exception:
-            pass
-    if not (os.path.exists(SCRIP_FILE) and load_local_scrip_master()):
-        download_scrip_master_stream()
+    # Start professional scrip-master background service:
+    #  - instant load from local cache if present
+    #  - streaming download with MB progress in terminal
+    #  - atomic .part → final rename (no corrupt files)
+    #  - daily 8:45 AM IST auto-refresh (Mon-Fri)
+    #  - 3 retries with backoff on failure
+    start_scrip_background()
     login_smart_api()
     task = asyncio.create_task(session_refresh_task())
     try:
@@ -287,82 +203,55 @@ def status():
     return {
         "status": "online",
         "angel_connected": bool(smart_api and jwt_token),
-        "symbols_count": len(scrip_master) or len(POPULAR_TOKENS),
+        "symbols_count": scrip_count(),
+        "scrip_loaded": scrip_ready(),
         "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_open": market_open,
     }
 
 
-def _score_item(s, query):
-    su = s["symbol_upper"]; nu = s["name_upper"]
-    score = 0
-    if su == query:                            score += 1000
-    elif su.startswith(query):                 score += 400
-    elif query in su:                          score += 200
-    # Fuzzy token prefix (e.g. "tata mot" matches TATA MOTORS)
-    qtoks = query.split()
-    if len(qtoks) > 1:
-        if all(t in su or t in nu for t in qtoks): score += 120
-    if nu == query:                            score += 300
-    elif nu.startswith(query):                 score += 150
-    elif query in nu:                          score += 80
-    # Boost indices & liquid large-caps
-    if s.get("type") == "INDEX":               score += 50
-    if s["symbol"].upper() in {p["symbol"].upper() for p in POPULAR_TOKENS}: score += 60  # popular stocks float up
-    if len(su) <= 8 and s.get("type") == "EQ": score += 5
-    return score
-
-
 @app.get("/api/search")
 def search(q: str = "", type_filter: str = ""):
-    """TradingView-style relevance-ranked search.
-    Prefix matches first, then substring, then name match.
-    If scrip_master not yet downloaded, searches POPULAR_TOKENS as fallback.
     """
-    query = (q or "").strip().upper()
-    # Build search corpus: live scrip_master + always include POPULAR_TOKENS for safety
-    # (so search works even before the scrip master finishes downloading)
-    corpus = list(scrip_master) if scrip_master else []
-    for p in POPULAR_TOKENS:
-        # Inject popular tokens if not already in corpus (same exchange+token)
-        if not any(s.get("token") == p["token"] and s.get("exchange") == p["exchange"] for s in corpus):
-            corpus.append({**p, "symbol_upper": p["symbol"].upper(), "name_upper": p["name"].upper(), "type": "EQ" if p["exchange"] in ("NSE","BSE") and "INDEX" not in p["name"] else "INDEX"})
+    TradingView-style relevance-ranked search.
+    Backed by professional scrip_loader:
+      - Angel One OpenAPIScripMaster.json (correct angelone.in URL)
+      - Stream-downloaded w/ progress, atomically saved
+      - Daily 8:45 AM IST refresh
+      - Local cache for instant startup
+    """
+    query = (q or "").strip()
 
-    if not query or len(query) < 1:
-        # Popular list on empty focus
+    # Empty query → curated popular indices + large-caps (never empty)
+    if not query:
         pop_syms = {p["symbol"].upper() for p in POPULAR_TOKENS}
-        featured = [s for s in corpus if s["symbol"].upper() in pop_syms][:30]
-        return {"results": featured}
+        live = scrip_search("") or []
+        # Merge popular tokens in case index hasn't loaded
+        featured = [s for s in live if s["symbol"].upper() in pop_syms]
+        if len(featured) < len(POPULAR_TOKENS):
+            have = {f["symbol"].upper() for f in featured}
+            for p in POPULAR_TOKENS:
+                if p["symbol"].upper() not in have:
+                    featured.append({"symbol": p["symbol"], "name": p["name"], "token": p["token"],
+                                     "exchange": p["exchange"], "type": "INDEX" if "INDEX" in p["name"] else "EQ"})
+                    have.add(p["symbol"].upper())
+        return {"results": featured[:30], "loaded": scrip_ready(), "count": scrip_count()}
 
-    scored = []
-    seen = set()
-    for s in corpus:
-        su = s.get("symbol_upper") or s["symbol"].upper()
-        key = f"{s.get('exchange')}:{s.get('token')}"
-        if key in seen: continue
-        score = _score_item(s, query)
-        if score > 0:
-            seen.add(key)
-            scored.append((-score, s))
-
-    scored.sort(key=lambda x: (x[0], x[1].get("symbol_upper", x[1].get("symbol", ""))))
-    results = []
-    for _, s in scored[:50]:
-        results.append({
-            "symbol": s["symbol"],
-            "name": s.get("name", s["symbol"]),
-            "token": s["token"],
-            "exchange": s["exchange"],
-            "type": s.get("type", "EQ"),
-        })
-    return {"results": results}
+    results = scrip_search(query, limit=20)
+    if results is None:
+        # Index not loaded yet → graceful
+        return {"results": [], "loaded": False, "message": "Stock list loading, try again in a few seconds..."}
+    return {"results": results, "loaded": True, "count": scrip_count()}
 
 
 @app.post("/api/admin/refresh_scrip")
 def refresh_scrip():
-    """Admin endpoint to force fresh scrip master download."""
-    download_scrip_master_stream()
-    return {"status": "ok", "count": len(scrip_master)}
+    """Admin endpoint: force fresh scrip master download (runs in background)."""
+    def _bg():
+        ok = refresh_scrip_master(force=True)
+        print(f"[admin] Force refresh {'OK' if ok else 'FAILED'}")
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"status": "started", "count": scrip_count()}
 
 
 # ---------- Candle cache with TTL + size limit + rate-limit backoff ----------
@@ -649,9 +538,10 @@ def get_candles(
 
 if __name__ == "__main__":
     import uvicorn, logging, sys, signal, threading
-    # On Windows, force SelectorEventLoop to avoid ProactorPipeTransport stack traces
-    if sys.platform == "win32":
-        import asyncio
+    # On Windows, force SelectorEventLoop to avoid ProactorPipeTransport stack traces.
+    # Python 3.14+ deprecates set_event_loop_policy; ProactorEventLoop is default, so only
+    # apply on older Pythons where the Proactor bug exists.
+    if sys.platform == "win32" and sys.version_info < (3, 14):
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except Exception:
