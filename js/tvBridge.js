@@ -140,11 +140,13 @@ class TVBridge {
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
         });
 
-        // 2) VOLUME
+        // 2) VOLUME — last value label hidden to avoid collision with RSI pane above
         this.charts.vol = this._makeChart('vol');
         this.series.vol = this.charts.vol.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: { type: 'volume' },
             priceScaleId: 'right',
+            priceLineVisible: false,
+            lastValueVisible: false,
         });
         this.charts.vol.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
 
@@ -199,17 +201,24 @@ class TVBridge {
         const vFmt = this._fmtVol(this.currentData);
         this.series.main.setData(fmt);
         this.series.vol.setData(vFmt);
-        // TRADINGVIEW-STYLE DEFAULT ZOOM: show last ~80 bars (not all data at once)
-        const n = fmt.length;
-        const barsVisible = Math.min(80, Math.max(40, n - 1));
-        const fromIdx = Math.max(0, n - barsVisible);
-        const toIdx = n - 1;
-        const range = { from: fromIdx - 0.5, to: toIdx + 6 };  // +6 = 6 bars space on right
-        try {
+        // TRADINGVIEW-STYLE DEFAULT ZOOM: show last ~80 bars (not all data)
+        this._anchorToLatest(fmt.length);
+    }
+
+    _anchorToLatest(n) {
+        // Small delay ensures LW has finished computing layout before applying range
+        const apply = () => {
+            const barsVisible = Math.min(80, Math.max(40, n - 1));
+            const fromIdx = Math.max(0, n - barsVisible);
+            const range = { from: fromIdx - 0.5, to: n + 6 };
             ['main','vol','rsi','macd'].forEach(k => {
-                this.charts[k].timeScale().setVisibleLogicalRange(range);
+                try { this.charts[k].timeScale().setVisibleLogicalRange(range); } catch (_) {}
+                try { this.charts[k].timeScale().scrollToRealTime(); } catch (_) {}
             });
-        } catch (e) { /* older LW versions fallback */ }
+        };
+        apply();
+        setTimeout(apply, 50);
+        setTimeout(apply, 250);
     }
 
     updateTick(candle) {

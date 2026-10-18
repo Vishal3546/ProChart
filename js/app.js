@@ -33,6 +33,7 @@ class App {
         this.divEngine = new DivergenceEngine();
         this.closingTrapEngine = new ClosingTrapEngine();
         this.absEngine = new OrderFlowAbsorptionEngine();
+        this.bigCandleDetector = new BigCandleDetector();
         this.greeksEngine = new GreeksEngine();
 
         this.pollingInterval = null;
@@ -492,6 +493,17 @@ class App {
                 }
             } catch (e) {}
         } else { this._setMetric('absResult', '⚪ OFF', 'muted'); }
+
+        // Big candle forming (live momentum detector) — always on
+        try {
+            const bc = this.bigCandleDetector.analyze(data, this.activeTimeframe);
+            this._setMetric('bigCandleResult', bc.label, bc.level);
+            if (bc.fresh) {
+                const volTxt = bc.volRatio ? ` (vol ${bc.volRatio.toFixed(1)}x)` : '';
+                this._pushFeed(`${bc.dir === 'bull' ? '🚀' : '🔻'} Big ${bc.dir} candle ${bc.magnitude.toFixed(1)}x forming${volTxt}`, bc.dir, 'big');
+                this.toast(`Big ${bc.dir} candle forming!`, bc.dir === 'bull' ? 'success' : 'danger', 3000);
+            }
+        } catch (e) {}
     }
 
     _setMetric(id, text, level) {
