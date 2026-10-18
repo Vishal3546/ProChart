@@ -174,7 +174,9 @@ body.dark-theme {
     font-family: 'JetBrains Mono', monospace;
 }
 .status-live { display: flex; gap: 8px; align-items: center; }
-.dot-green { width: 7px; height: 7px; background: var(--up); border-radius: 50%; box-shadow: 0 0 6px var(--up); animation: pulse 2s infinite; }
+.dot-green  { width: 7px; height: 7px; background: var(--up);    border-radius: 50%; box-shadow: 0 0 6px var(--up);    animation: pulse 2s infinite; }
+.dot-yellow { width: 7px; height: 7px; background: var(--warn);  border-radius: 50%; }
+.dot-red    { width: 7px; height: 7px; background: var(--down);  border-radius: 50%; box-shadow: 0 0 6px var(--down);  animation: pulse 2s infinite; }
 
 /* ===== TEXT COLORS ===== */
 .text-success { color: var(--up) !important; }

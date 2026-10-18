@@ -301,25 +301,35 @@ class App {
     }
 
     setConnectionStatus(status, sourceLabel) {
-        this.isLiveConnected = !!status;
+        this.isLiveConnected = !!status && this.marketOpen;
         this.source = sourceLabel || (status ? 'AngelOne' : 'SimulatedPro');
         const badge = document.getElementById('connBadge');
         const txt = document.getElementById('connText');
         const foot = document.getElementById('engineFooter');
         const dot = document.getElementById('connDot');
+        const live = !!status && this.marketOpen;
+        const closed = !!status && !this.marketOpen;
         if (badge && txt) {
             badge.classList.remove('conn-live','conn-sim','conn-off');
-            if (status) { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
-            else { badge.classList.add('conn-sim'); txt.textContent = 'SIMULATED'; }
+            if (live)   { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
+            else if (closed) { badge.classList.add('conn-off'); txt.textContent = 'MARKET CLOSED'; }
+            else        { badge.classList.add('conn-sim'); txt.textContent = 'SIMULATED'; }
         }
-        if (foot) foot.textContent = `v2026.10 Engine • ${status ? '🟢 Angel One Live' : '🟡 Simulated Feed'} • ${this.source}`;
-        if (dot) dot.className = status ? 'dot-green' : 'dot-green';
+        if (foot) foot.textContent = `v2026.10 Engine • ${live ? '🟢 Angel One Live' : closed ? '🔴 Market Closed' : '🟡 Simulated Feed'} • ${this.source}`;
+        if (dot) dot.className = live ? 'dot-green' : closed ? 'dot-red' : 'dot-yellow';
+    }
+
+    refreshStatusBadge() {
+        // Call this whenever marketOpen flips so the badge updates without a full reload
+        this.setConnectionStatus(this.source === 'AngelOne', this.source);
     }
 
     async checkServerStatus() {
         const s = await this.dataFeed.fetchStatus();
         if (s && s.status === 'online') {
+            const prev = this.marketOpen;
             this.marketOpen = s.market_open !== false;
+            if (this.marketOpen !== prev) this.refreshStatusBadge();
             this.setConnectionStatus(!!s.angel_connected, s.angel_connected ? 'AngelOne' : 'SimulatedPro');
             if (!s.angel_connected) {
                 this.toast('Angel One not connected — showing simulated data. Add .env credentials for live feed.', 'warn');
@@ -609,6 +619,8 @@ class App {
         const schedule = () => {
             const baseMs = this.marketOpen ? 3000 : 15000;
             const ms = Math.max(baseMs, backoffMs);
+            // Refresh badge each loop (catches market open→close transition)
+            this.refreshStatusBadge();
             this.pollingInterval = setTimeout(async () => { await tick(); schedule(); }, ms);
         };
         // First tick after small delay (gives time for candles to load)

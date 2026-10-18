@@ -25,10 +25,10 @@ from datetime import datetime, timedelta, timezone
 import requests
 import pyotp
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 # SmartApi SDK — try both capitalizations; graceful fallback if not installed.
 # smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
@@ -36,7 +36,7 @@ try:
     try:
         from SmartApi.smartConnect import SmartConnect  # canonical (1.5.5)
     except ImportError:
-        from SmartApi.smartConnect import SmartConnect  # older / flat wheels
+        from smartapi.smartConnect import SmartConnect  # older / flat wheels
 except ImportError:
     SmartConnect = None
 
@@ -214,6 +214,17 @@ app.add_middleware(
 
 
 # ---------- Static files (serve the UI directly from FastAPI) ----------
+# Add cache-busting headers so dev changes aren't hidden behind 304 caching
+@app.middleware("http")
+async def no_cache_for_dev(request: Request, call_next):
+    response: Response = await call_next(request)
+    path = request.url.path
+    if path.endswith((".js", ".css", ".html")) or path == "/":
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 app.mount("/css", StaticFiles(directory=os.path.join(STATIC_DIR, "css")), name="css")
 app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js")
 
