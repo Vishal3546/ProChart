@@ -155,13 +155,18 @@ class TVBridge {
         });
         this.charts.vol.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
 
-        // 3) RSI
+        // 3) RSI — fixed 0-100 scale (no autoScale drift); shows 0/30/50/70/100
         this.charts.rsi = this._makeChart('rsi');
         this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
             color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
         });
-        this.charts.rsi.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+        this.charts.rsi.priceScale('right').applyOptions({
+            scaleMargins: { top: 0.05, bottom: 0.05 },
+            autoScale: false,  // lock to 0-100 so levels never drift
+        });
         try {
+            this.series.rsi.createPriceLine({ price: 0,   color: '#2b2b43', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid,  axisLabelVisible: false });
+            this.series.rsi.createPriceLine({ price: 100, color: '#2b2b43', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid,  axisLabelVisible: false });
             this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
             this.series.rsi.createPriceLine({ price: 30, color: '#089981', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
             this.series.rsi.createPriceLine({ price: 50, color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: '50' });
@@ -174,6 +179,13 @@ class TVBridge {
         this.series.macdHist = this.charts.macd.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false });
         this.series.macdFast = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'MACD' });
         this.series.macdSlow = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#FF6D00', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'Signal' });
+        // Zero line on MACD (reference for bullish/bearish crossover)
+        try {
+            this.series.macdFast.createPriceLine({
+                price: 0, color: '#787b86', lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false, title: '0',
+            });
+        } catch (e) {}
         this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
 
         // Disable wheel/scroll/horiz drag on sub-charts so main chart drives it
@@ -312,6 +324,18 @@ class TVBridge {
     addRSI(period = 14) {
         const rsiData = TechnicalIndicators.RSI(this.currentData, period);
         this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value !== null));
+        // Lock RSI pane to 0-100 (custom autoscaleInfoProvider per LW v5 docs)
+        try {
+            this.series.rsi.applyOptions({
+                autoscaleInfoProvider: () => ({
+                    priceRange: { minValue: 0, maxValue: 100 },
+                    margins: { top: 8, bottom: 8 },
+                }),
+            });
+        } catch (e) {
+            // Fallback: set priceScale min/max via visible range (older LW builds)
+            try { this.charts.rsi.priceScale('right').applyOptions({ autoScale: false }); } catch (_) {}
+        }
     }
 
     // ---------- clear / markers ----------

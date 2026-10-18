@@ -231,7 +231,9 @@ def search(q, limit=20):
         matches = []
         for s in _search_index:
             if s["symKey"].startswith(query):
-                matches.append((1, s))
+                # Heavily prioritize EQ/INDEX over OPT_FUT for quick typing
+                typeBoost = 0 if s["type"] in ("EQ", "INDEX") else 50
+                matches.append((typeBoost + 1, s))
                 if len(matches) >= limit: break
     else:
         matches = []
@@ -250,9 +252,17 @@ def search(q, limit=20):
                 toks = query.split()
                 if len(toks) > 1 and all(t in sk or t in nk for t in toks):
                     rank = 5
+            # Heavily prioritize EQ/INDEX ahead of OPT_FUT so TCS/TATASTEEL etc
+            # appear before option strikes. OPT_FUT rank is bumped into a later tier
+            # (rank + 20) so all EQ/INDEX results come first.
+            if s["type"] == "OPT_FUT":
+                rank += 20
+            # Blue-chip (short symbol) tiny boost to float RELIANCE/TCS up
+            if s["type"] in ("EQ", "INDEX") and len(sk) <= 10:
+                rank -= 0.1
             if rank < 99:
                 matches.append((rank, s))
-    matches.sort(key=lambda x: (x[0], x[1]["symKey"]))
+    matches.sort(key=lambda x: (x[0], 0 if x[1]["type"] == "INDEX" else 1 if x[1]["type"] == "EQ" else 2, x[1]["symKey"]))
     out = []
     for _, s in matches[:limit]:
         out.append({

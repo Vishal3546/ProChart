@@ -189,6 +189,14 @@ app.mount("/css", StaticFiles(directory=os.path.join(STATIC_DIR, "css")), name="
 app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js")
 
 
+@app.get("/favicon.ico")
+def favicon():
+    for p in ("favicon.ico", "favicon.svg", "logo/favicon.svg", "logo/favicon.ico"):
+        fp = os.path.join(STATIC_DIR, p)
+        if os.path.exists(fp):
+            return FileResponse(fp)
+    return Response(status_code=204)
+
 @app.get("/")
 def root():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
