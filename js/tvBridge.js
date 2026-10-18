@@ -68,13 +68,18 @@ class TVBridge {
 
     _baseChartOpts(extra = {}) {
         return {
-            layout: { background: { color: '#131722' }, textColor: '#d1d4dc', fontFamily: "Inter,-apple-system,sans-serif" },
+            layout: {
+                background: { color: '#131722' },
+                textColor: '#d1d4dc',
+                fontFamily: "Inter,-apple-system,sans-serif",
+                attributionLogo: false,  // hide TradingView/LW logo on chart (v5 option)
+            },
             grid: { vertLines: { color: 'transparent' }, horzLines: { color: '#1f2933', style: 1 } },
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-            rightPriceScale: { borderColor: '#2b2b43', borderVisible: true, alignLabels: true },
-            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 5, visible: false },
+            rightPriceScale: { borderColor: '#2b2b43', borderVisible: true, alignLabels: true, scaleMargins: { top: 0.05, bottom: 0.05 } },
+            leftPriceScale: { visible: false },
+            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 6, barSpacing: 8, visible: false, minBarSpacing: 0.5 },
             handleScroll: { vertTouchDrag: false },
-            watermark: { visible: false },  // hide "TV"/LW logo
             ...extra,
         };
     }
@@ -164,7 +169,7 @@ class TVBridge {
 
         // 4) MACD
         this.charts.macd = this._makeChart('macd', {
-            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 5, visible: true },
+            timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 6, visible: true, barSpacing: 8, minBarSpacing: 0.5 },
         });
         this.series.macdHist = this.charts.macd.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false });
         this.series.macdFast = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'MACD' });
@@ -191,10 +196,17 @@ class TVBridge {
         const vFmt = this._fmtVol(this.currentData);
         this.series.main.setData(fmt);
         this.series.vol.setData(vFmt);
-        this.charts.main.timeScale().fitContent();
-        this.charts.vol.timeScale().fitContent();
-        this.charts.rsi.timeScale().fitContent();
-        this.charts.macd.timeScale().fitContent();
+        // TRADINGVIEW-STYLE DEFAULT ZOOM: show last ~80 bars (not all data at once)
+        const n = fmt.length;
+        const barsVisible = Math.min(80, Math.max(40, n - 1));
+        const fromIdx = Math.max(0, n - barsVisible);
+        const toIdx = n - 1;
+        const range = { from: fromIdx - 0.5, to: toIdx + 6 };  // +6 = 6 bars space on right
+        try {
+            ['main','vol','rsi','macd'].forEach(k => {
+                this.charts[k].timeScale().setVisibleLogicalRange(range);
+            });
+        } catch (e) { /* older LW versions fallback */ }
     }
 
     updateTick(candle) {

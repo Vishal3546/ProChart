@@ -83,17 +83,29 @@ def get_mac():
     return ":".join("{:02x}".format((uuid.getnode() >> i) & 0xff) for i in range(0, 48, 8))[::-1]
 
 
+SCRIP_FILE_MAX_AGE_DAYS = 1  # redownload scrip master daily (catches demergers/name changes)
+
 def load_local_scrip_master():
     global scrip_master
     if not os.path.exists(SCRIP_FILE):
         return False
+    # Auto-refresh if file older than 1 day
+    try:
+        age_days = (time.time() - os.path.getmtime(SCRIP_FILE)) / 86400.0
+        if age_days > SCRIP_FILE_MAX_AGE_DAYS:
+            print(f"ℹ️ ScripMaster is {age_days:.1f} days old, will refresh...")
+            return False
+    except Exception:
+        pass
     try:
         with open(SCRIP_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
         scrip_master = []
+        # List of known demerged/delisted symbols to exclude (post-2024 corporate actions)
+        BLOCKED_SYMS = {"TATAMOTORS", "TATAMTRDVR"}
         for s in raw:
             exch = s.get("exch_seg", "")
-            sym = str(s.get("symbol", ""))
+            sym_raw = str(s.get("symbol", ""))
             name = str(s.get("name", ""))
             token = str(s.get("token", ""))
             inst_type = s.get("instrumenttype", "")
@@ -101,11 +113,18 @@ def load_local_scrip_master():
             expiry = str(s.get("expiry", ""))
             strike = float(s.get("strike", 0) or 0)
             lotsize = int(s.get("lotsize", 1) or 1)
+            asas = str(s.get("asas", ""))  # sometimes AS/BE/IL/ST (suspended)
 
-            if exch in ("NSE", "BSE") and (sym.endswith("-EQ") or inst_type in ("AMXIDX",)):
+            if exch in ("NSE", "BSE") and (sym_raw.endswith("-EQ") or inst_type in ("AMXIDX",)):
+                sym = sym_raw.replace("-EQ", "")
+                if sym.upper() in BLOCKED_SYMS:
+                    continue
+                # Skip suspended / illiquid (ST/BE/IL marked)
+                if asas in ("ST", "BE", "IL") and inst_type != "AMXIDX":
+                    continue
                 scrip_master.append({
-                    "symbol": sym.replace("-EQ", ""),
-                    "symbol_upper": sym.replace("-EQ", "").upper(),
+                    "symbol": sym,
+                    "symbol_upper": sym.upper(),
                     "name_upper": name.upper(),
                     "name": name,
                     "token": token,
@@ -114,8 +133,8 @@ def load_local_scrip_master():
                 })
             elif exch in ("NFO", "BFO", "MCX", "CDS"):
                 scrip_master.append({
-                    "symbol": sym,
-                    "symbol_upper": sym.upper(),
+                    "symbol": sym_raw,
+                    "symbol_upper": sym_raw.upper(),
                     "name_upper": name.upper(),
                     "name": name,
                     "token": token,
@@ -126,7 +145,9 @@ def load_local_scrip_master():
                     "strike": strike,
                     "lotsize": lotsize,
                 })
-        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT)")
+        # Sort EQs alphabetically so prefix matches bubble up early
+        scrip_master.sort(key=lambda x: (0 if x["type"] == "INDEX" else 1, x["symbol_upper"]))
+        print(f"✅ Loaded {len(scrip_master)} Instruments (EQ+INDEX+OPT+FUT, auto-refresh daily)")
         return True
     except Exception as e:
         print(f"⚠️ Cache read error: {e}")
@@ -185,6 +206,15 @@ async def session_refresh_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Delete very old / pre-refresh scrip master so we download fresh (catches demergers)
+    if os.path.exists(SCRIP_FILE):
+        try:
+            age_days = (time.time() - os.path.getmtime(SCRIP_FILE)) / 86400.0
+            if age_days > 2:
+                os.remove(SCRIP_FILE)
+                print("🗑️  Removed old scripMaster.json (>2 days old) — re-downloading for latest instruments.")
+        except Exception:
+            pass
     if not (os.path.exists(SCRIP_FILE) and load_local_scrip_master()):
         download_scrip_master_stream()
     login_smart_api()
@@ -250,36 +280,62 @@ def status():
 
 
 @app.get("/api/search")
-def search(q: str = ""):
-    query = q.strip().upper()
-    if not query:
-        return {"results": POPULAR_TOKENS}
+def search(q: str = "", type_filter: str = ""):
+    """TradingView-style relevance-ranked search.
+    Prefix matches first, then substring, then name match.
+    Always uses live scrip_master (no hardcoded fallbacks).
+    """
+    query = (q or "").strip().upper()
+    if not query or len(query) < 1:
+        # Show a small curated "popular" list only on empty focus (last resort)
+        featured = [s for s in scrip_master if s["symbol"].upper() in {
+            "NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX","NIFTYIT",
+            "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","BHARTIARTL",
+            "LT","AXISBANK","ITC","HINDUNILVR","MARUTI","ADANIENT","TATAMOTORS","TATASTEEL",
+            "WIPRO","TECHM","BAJFINANCE","ASIANPAINT","SUNPHARMA","ONGC","NTPC","KOTAKBANK",
+        }]
+        # If scrip_master failed to load, fall back to POPULAR_TOKENS
+        if not featured:
+            return {"results": POPULAR_TOKENS[:30]}
+        return {"results": featured[:30]}
 
+    scored = []
+    seen = set()
+    for s in scrip_master:
+        su = s["symbol_upper"]; nu = s["name_upper"]
+        if su in seen: continue
+        # Relevance score (higher = better match)
+        score = 0
+        if su == query:                          score += 1000  # exact symbol match
+        elif su.startswith(query):               score += 400   # symbol prefix
+        elif query in su:                        score += 200   # symbol substring
+        if nu == query:                          score += 300
+        elif nu.startswith(query):               score += 150
+        elif query in nu:                        score += 80
+        # Boost indices & liquid large-caps (simple heuristic: shorter name = big stock)
+        if s["type"] == "INDEX":                 score += 50
+        if len(su) <= 8 and s["type"] == "EQ":   score += 10    # shorter ticker ~ blue chip
+        if score > 0:
+            scored.append((-score, s))   # negative for ascending sort
+
+    scored.sort(key=lambda x: (x[0], x[1]["symbol_upper"]))
     results = []
-    seen_tokens = set()
-
-    for s in POPULAR_TOKENS:
-        if query in s["symbol"].upper() or query in s["name"].upper():
-            results.append(s)
-            seen_tokens.add(f"{s['exchange']}:{s['token']}")
-
-    if scrip_master:
-        for s in scrip_master:
-            if query in s["symbol_upper"] or query in s["name_upper"]:
-                key = f"{s['exchange']}:{s['token']}"
-                if key in seen_tokens:
-                    continue
-                results.append({
-                    "symbol": s["symbol"],
-                    "name": s["name"],
-                    "token": s["token"],
-                    "exchange": s["exchange"],
-                    "type": s.get("type", "EQ"),
-                })
-                seen_tokens.add(key)
-                if len(results) >= 50:
-                    break
+    for _, s in scored[:50]:
+        results.append({
+            "symbol": s["symbol"],
+            "name": s["name"],
+            "token": s["token"],
+            "exchange": s["exchange"],
+            "type": s.get("type", "EQ"),
+        })
     return {"results": results}
+
+
+@app.post("/api/admin/refresh_scrip")
+def refresh_scrip():
+    """Admin endpoint to force fresh scrip master download."""
+    download_scrip_master_stream()
+    return {"status": "ok", "count": len(scrip_master)}
 
 
 # ---------- Candle cache with TTL + size limit + rate-limit backoff ----------
@@ -441,7 +497,17 @@ def get_candles(
             }
             smart_int = interval_map.get(interval, "FIFTEEN_MINUTE")
             to_date = now_ist
-            from_date = to_date - timedelta(days=30 if smart_int != "ONE_DAY" else 500)
+            # Candle history per TF (TradingView-style enough bars to fill screen)
+            history_days = {
+                "ONE_MINUTE": 5,       # ~375 bars
+                "THREE_MINUTE": 10,    # ~1250 bars /3 = ~400
+                "FIVE_MINUTE": 15,     # ~1125 bars
+                "FIFTEEN_MINUTE": 30,  # ~450 bars
+                "THIRTY_MINUTE": 60,   # ~450 bars
+                "ONE_HOUR": 120,       # ~900 bars (4 months)
+                "ONE_DAY": 730,        # ~500 bars (2 years)
+            }.get(smart_int, 30)
+            from_date = to_date - timedelta(days=history_days)
 
             res = smart_api.getCandleData({
                 "exchange": exchange,

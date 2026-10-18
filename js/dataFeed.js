@@ -1,14 +1,17 @@
 /* ============================================================
- * DataFeed — client API client (v2026.10)
- * Same-origin when served from FastAPI; file:// fallback to localhost.
- * Returns UNIX-second candles; sanitizes NaN/invalid rows.
+ * DataFeed — client-side API client (v2026.10)
+ * Works whether page is opened from FastAPI (same-origin) or file://
+ * (falls back to http://127.0.0.1:8000 when file://).
+ * Returns candles with UNIX-second timestamps.
  * ============================================================ */
 class DataFeed {
     constructor() {
+        // When served from FastAPI, use relative URLs (works through reverse proxies too).
+        // When opened from file:// (double-clicked), fall back to localhost.
         if (window.location.protocol === 'file:') {
             this.baseUrl = 'http://127.0.0.1:8000';
         } else {
-            this.baseUrl = '';
+            this.baseUrl = '';  // same origin
         }
     }
 
@@ -18,20 +21,25 @@ class DataFeed {
 
     async fetchCandleData(symbol = 'NIFTY', timeframe = '15', meta = {}) {
         try {
-            const params = new URLSearchParams({ symbol: symbol || 'NIFTY', interval: timeframe });
+            const params = new URLSearchParams({
+                symbol: symbol || 'NIFTY',
+                interval: timeframe,
+            });
             if (meta.token)    params.set('token', meta.token);
             if (meta.exchange) params.set('exchange', meta.exchange);
 
-            const res = await fetch(`${this.baseUrl}/api/candles?${params.toString()}`);
+            const url = `${this.baseUrl}/api/candles?${params.toString()}`;
+            const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
 
             if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
                 return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
             }
+            // Fallback
             return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
         } catch (err) {
-            console.warn('API candle fetch failed, using fallback:', err.message);
+            console.warn('API candle fetch failed, using fallback generator:', err.message);
             return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
         }
     }
@@ -41,15 +49,19 @@ class DataFeed {
             const params = new URLSearchParams({ symbol });
             if (meta.token)    params.set('token', meta.token);
             if (meta.exchange) params.set('exchange', meta.exchange);
-            const res = await fetch(`${this.baseUrl}/api/quote?${params.toString()}`);
+            const url = `${this.baseUrl}/api/quote?${params.toString()}`;
+            const res = await fetch(url);
             if (!res.ok) return null;
             return await res.json();
-        } catch (e) { return null; }
+        } catch (err) {
+            return null;
+        }
     }
 
     async fetchStatus() {
         try {
-            const res = await fetch(`${this.baseUrl}/api/status`);
+            const url = `${this.baseUrl}/api/status`;
+            const res = await fetch(url);
             if (!res.ok) return null;
             return await res.json();
         } catch (e) { return null; }
@@ -57,7 +69,8 @@ class DataFeed {
 
     async search(q) {
         try {
-            const res = await fetch(`${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`);
+            const url = `${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`;
+            const res = await fetch(url);
             if (!res.ok) return [];
             const data = await res.json();
             return Array.isArray(data.results) ? data.results : [];

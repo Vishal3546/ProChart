@@ -20,9 +20,11 @@
     --radius: 6px;
 }
 html, body { height: 100%; }
-/* Hide LightweightCharts watermark logo on sub-charts */
+/* Hide LightweightCharts watermark/logo (multiple selectors cover all LW v5 builds) */
 .tv-lightweight-charts-watermark,
 [class*="watermark"] { display: none !important; }
+#mainTvChart canvas + div,
+.chart-container canvas ~ div[style*="pointer-events"] { display: none !important; }
 body.dark-theme {
     background: var(--bg-1);
     color: var(--fg-1);
