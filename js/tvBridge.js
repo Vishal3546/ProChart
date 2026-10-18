@@ -155,22 +155,20 @@ class TVBridge {
         });
         this.charts.vol.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
 
-        // 3) RSI — fixed 0-100 scale (no autoScale drift); shows 0/30/50/70/100
+        // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines
         this.charts.rsi = this._makeChart('rsi');
         this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
             color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
         });
         this.charts.rsi.priceScale('right').applyOptions({
-            scaleMargins: { top: 0.05, bottom: 0.05 },
+            scaleMargins: { top: 0.08, bottom: 0.08 },
             autoScale: true,
         });
         try {
-            this.series.rsi.createPriceLine({ price: 0,   color: '#2b2b43', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid,  axisLabelVisible: false });
-            this.series.rsi.createPriceLine({ price: 100, color: '#2b2b43', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid,  axisLabelVisible: false });
             this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
             this.series.rsi.createPriceLine({ price: 30, color: '#089981', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
             this.series.rsi.createPriceLine({ price: 50, color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: '50' });
-        } catch (e) {}
+        } catch (e) { console.warn('RSI price lines failed', e); }
 
         // 4) MACD
         this.charts.macd = this._makeChart('macd', {
@@ -322,41 +320,22 @@ class TVBridge {
 
     // ---------- RSI (sub-chart 3) ----------
     addRSI(period = 14) {
-        if (!this.series.rsi) {
-            // Recreate series if removed somehow
-            this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
-                color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
-            });
-        }
-        const rsiData = TechnicalIndicators.RSI(this.currentData, period);
-        this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value !== null));
-        // Keep RSI pane autoscaled but with soft 0-100 margins (safe — LW docs pattern)
+        if (!this.series.rsi) return;
         try {
-            const opts = this.series.rsi.options();
-            const baseProv = opts.autoscaleInfoProvider;
-            this.series.rsi.applyOptions({
-                autoscaleInfoProvider: (...args) => {
-                    const res = baseProv ? baseProv(...args) : { priceRange: null, margins: { top: 4, bottom: 4 } };
-                    const pr = res.priceRange;
-                    // Don't shrink beyond 0/100; still allow the chart to pad slightly
-                    const minV = pr ? Math.min(pr.minValue, 5) : 5;
-                    const maxV = pr ? Math.max(pr.maxValue, 95) : 95;
-                    return {
-                        priceRange: { minValue: Math.max(0, minV - 5), maxValue: Math.min(100, maxV + 5) },
-                        margins: { top: 4, bottom: 4 },
-                    };
-                },
-            });
-        } catch (e) { /* if the above is unsupported, leave default autoscale (safe) */ }
+            const rsiData = TechnicalIndicators.RSI(this.currentData, period);
+            this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value != null && isFinite(d.value)));
+        } catch (e) { console.warn('RSI setData failed', e); }
     }
 
     // ---------- clear / markers ----------
     clearIndicators() {
         Object.keys(this.overlays).forEach(k => this._removeOverlay(k));
+        if (this.vwapSeries) { try { this.charts.main.removeSeries(this.vwapSeries); } catch (e) {} this.vwapSeries = null; }
+        this.removeBollinger();
+        this.removeSuperTrend();
         this.removeMACD();
-        // RSI sub-chart: clear but keep dashed reference lines
-        this.series.rsi.setData([]);
-        // Volume always stays (it's on its own pane, not an "indicator")
+        // RSI: clear data but don't delete series (series deletion → null errors)
+        try { if (this.series.rsi) this.series.rsi.setData([]); } catch (e) {}
     }
 
     setMarkers(markersData) {
