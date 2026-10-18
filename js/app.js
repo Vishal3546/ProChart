@@ -127,12 +127,18 @@ class App {
             if (cb) {
                 cb.addEventListener('change', (e) => {
                     this.patternSettings[key] = e.target.checked;
-                    // master override: toggling master flips all to match if turning off
-                    if (key === 'master' && !e.target.checked) {
+                    // MASTER toggle = turn all sub-scanners ON/OFF together
+                    if (key === 'master') {
                         ['engulfing','star','hammer','doji','vcp','dbl','flag','div','trap','abs'].forEach(k => {
-                            this.patternSettings[k] = false;
-                            const c = document.getElementById('pat_' + k); if (c) c.checked = false;
+                            this.patternSettings[k] = e.target.checked;
+                            const c = document.getElementById('pat_' + k); if (c) c.checked = e.target.checked;
                         });
+                    } else {
+                        // If user turns any single scanner ON, keep master ON; if all OFF, set master OFF
+                        const anyOn = ['engulfing','star','hammer','doji','vcp','dbl','flag','div','trap','abs']
+                                        .some(k => this.patternSettings[k]);
+                        this.patternSettings.master = anyOn;
+                        const mcb = document.getElementById('pat_master'); if (mcb) mcb.checked = anyOn;
                     }
                     localStorage.setItem('prochart_pat_settings', JSON.stringify(this.patternSettings));
                     this.updateUIState();
@@ -140,6 +146,12 @@ class App {
                 });
             }
         });
+
+        // Manual refresh button (rounded)
+        const refreshBtn = document.getElementById('refreshBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => this._manualRefresh(refreshBtn));
+        }
 
         const searchInput = document.getElementById('searchInput');
         if (searchInput) {
@@ -626,6 +638,23 @@ class App {
         // First tick after small delay (gives time for candles to load)
         setTimeout(tick, 1500);
         schedule();
+    }
+
+    // Manual refresh: reload candles + re-run analytics (with visual spinner)
+    async _manualRefresh(btn) {
+        if (!btn) return;
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+        btn.disabled = true;
+        try {
+            // Force cache bust: server will return fresh candles
+            await this.loadChartData(this.activeSymbol, this.activeTimeframe);
+            this.toast('Data refreshed ✅', 'success', 2000);
+        } catch (e) {
+            this.toast('Refresh failed', 'error', 2000);
+        } finally {
+            setTimeout(() => { btn.innerHTML = orig; btn.disabled = false; }, 400);
+        }
     }
 
     updateHeaderPrice(ltp, diff, prevClose) {

@@ -96,6 +96,9 @@ body.dark-theme {
 }
 .btn:hover { background: var(--bg-4); border-color: var(--accent); }
 .btn-mini { padding: 4px 8px; font-size: 11px; }
+.btn-refresh { background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%); border-color: #2563eb; color: #fff; }
+.btn-refresh:hover { background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%); box-shadow: 0 0 12px rgba(37,99,235,0.5); transform: rotate(90deg); }
+.btn-refresh:active { transform: rotate(360deg); transition: transform 0.5s; }
 
 /* ===== MAIN LAYOUT ===== */
 .main-terminal { display: flex; flex: 1; height: calc(100vh - 73px); min-height: 0; }

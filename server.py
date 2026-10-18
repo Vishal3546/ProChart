@@ -57,18 +57,32 @@ SCRIP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripMast
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 
 POPULAR_TOKENS = [
-    {"symbol": "NIFTY",     "name": "NIFTY 50 INDEX",        "token": "99926000", "exchange": "NSE", "base": 22548.16},
-    {"symbol": "BANKNIFTY", "name": "BANK NIFTY INDEX",      "token": "99926009", "exchange": "NSE", "base": 48200.50},
-    {"symbol": "FINNIFTY",  "name": "FIN NIFTY INDEX",       "token": "99926037", "exchange": "NSE", "base": 23100.00},
-    {"symbol": "SENSEX",    "name": "SENSEX INDEX",          "token": "99919000", "exchange": "BSE", "base": 74200.00},
-    {"symbol": "RELIANCE",  "name": "RELIANCE INDUSTRIES",   "token": "2885",     "exchange": "NSE", "base": 2950.00},
-    {"symbol": "HDFCBANK",  "name": "HDFC BANK LTD",         "token": "1333",     "exchange": "NSE", "base": 1450.25},
-    {"symbol": "TCS",       "name": "TATA CONSULTANCY",      "token": "11536",    "exchange": "NSE", "base": 3980.10},
-    {"symbol": "INFY",      "name": "INFOSYS LTD",           "token": "1594",     "exchange": "NSE", "base": 1520.45},
-    {"symbol": "SBIN",      "name": "STATE BANK OF INDIA",   "token": "3045",     "exchange": "NSE", "base": 780.30},
-    {"symbol": "TATAMOTORS","name": "TATA MOTORS",           "token": "3456",     "exchange": "NSE", "base": 950.60},
-    {"symbol": "TATASTEEL", "name": "TATA STEEL",            "token": "3499",     "exchange": "NSE", "base": 160.20},
-    {"symbol": "ICICIBANK", "name": "ICICI BANK LTD",        "token": "4963",     "exchange": "NSE", "base": 1080.70},
+    {"symbol": "NIFTY",     "name": "NIFTY 50 INDEX",         "token": "99926000", "exchange": "NSE", "base": 22548.16},
+    {"symbol": "BANKNIFTY", "name": "BANK NIFTY INDEX",       "token": "99926009", "exchange": "NSE", "base": 48200.50},
+    {"symbol": "FINNIFTY",  "name": "FIN NIFTY INDEX",        "token": "99926037", "exchange": "NSE", "base": 23100.00},
+    {"symbol": "SENSEX",    "name": "SENSEX INDEX",           "token": "99919000", "exchange": "BSE", "base": 74200.00},
+    {"symbol": "RELIANCE",  "name": "RELIANCE INDUSTRIES",    "token": "2885",     "exchange": "NSE", "base": 2950.00},
+    {"symbol": "HDFCBANK",  "name": "HDFC BANK LTD",          "token": "1333",     "exchange": "NSE", "base": 1450.25},
+    {"symbol": "TCS",       "name": "TATA CONSULTANCY",       "token": "11536",    "exchange": "NSE", "base": 3980.10},
+    {"symbol": "INFY",      "name": "INFOSYS LTD",            "token": "1594",     "exchange": "NSE", "base": 1520.45},
+    {"symbol": "SBIN",      "name": "STATE BANK OF INDIA",    "token": "3045",     "exchange": "NSE", "base": 780.30},
+    {"symbol": "TATASTEEL", "name": "TATA STEEL",             "token": "3499",     "exchange": "NSE", "base": 160.20},
+    {"symbol": "ICICIBANK", "name": "ICICI BANK LTD",         "token": "4963",     "exchange": "NSE", "base": 1080.70},
+    {"symbol": "BHARTIARTL","name": "BHARTI AIRTEL",          "token": "10999",    "exchange": "NSE", "base": 1650.00},
+    {"symbol": "LT",        "name": "LARSEN & TOUBRO",        "token": "11483",    "exchange": "NSE", "base": 3700.00},
+    {"symbol": "AXISBANK",  "name": "AXIS BANK",              "token": "5900",     "exchange": "NSE", "base": 1180.00},
+    {"symbol": "ITC",       "name": "ITC LTD",                "token": "16675",    "exchange": "NSE", "base": 490.00},
+    {"symbol": "HINDUNILVR","name": "HINDUSTAN UNILEVER",     "token": "1394",     "exchange": "NSE", "base": 2560.00},
+    {"symbol": "MARUTI",    "name": "MARUTI SUZUKI",          "token": "13538",    "exchange": "NSE", "base": 11500.00},
+    {"symbol": "ADANIENT",  "name": "ADANI ENTERPRISES",      "token": "694",      "exchange": "NSE", "base": 2400.00},
+    {"symbol": "WIPRO",     "name": "WIPRO LTD",              "token": "3450",     "exchange": "NSE", "base": 520.00},
+    {"symbol": "TECHM",     "name": "TECH MAHINDRA",          "token": "13538",    "exchange": "NSE", "base": 1520.00},
+    {"symbol": "BAJFINANCE","name": "BAJAJ FINANCE",          "token": "11532",    "exchange": "NSE", "base": 6800.00},
+    {"symbol": "ASIANPAINT","name": "ASIAN PAINTS",           "token": "236",      "exchange": "NSE", "base": 2900.00},
+    {"symbol": "SUNPHARMA", "name": "SUN PHARMA",             "token": "16675",    "exchange": "NSE", "base": 1800.00},
+    {"symbol": "ONGC",      "name": "OIL & NATURAL GAS",      "token": "2475",     "exchange": "NSE", "base": 260.00},
+    {"symbol": "NTPC",      "name": "NTPC LTD",               "token": "20374",    "exchange": "NSE", "base": 370.00},
+    {"symbol": "KOTAKBANK", "name": "KOTAK MAHINDRA BANK",    "token": "1922",     "exchange": "NSE", "base": 1780.00},
 ]
 
 
@@ -279,51 +293,64 @@ def status():
     }
 
 
+def _score_item(s, query):
+    su = s["symbol_upper"]; nu = s["name_upper"]
+    score = 0
+    if su == query:                            score += 1000
+    elif su.startswith(query):                 score += 400
+    elif query in su:                          score += 200
+    # Fuzzy token prefix (e.g. "tata mot" matches TATA MOTORS)
+    qtoks = query.split()
+    if len(qtoks) > 1:
+        if all(t in su or t in nu for t in qtoks): score += 120
+    if nu == query:                            score += 300
+    elif nu.startswith(query):                 score += 150
+    elif query in nu:                          score += 80
+    # Boost indices & liquid large-caps
+    if s.get("type") == "INDEX":               score += 50
+    if s["symbol"].upper() in {p["symbol"].upper() for p in POPULAR_TOKENS}: score += 60  # popular stocks float up
+    if len(su) <= 8 and s.get("type") == "EQ": score += 5
+    return score
+
+
 @app.get("/api/search")
 def search(q: str = "", type_filter: str = ""):
     """TradingView-style relevance-ranked search.
     Prefix matches first, then substring, then name match.
-    Always uses live scrip_master (no hardcoded fallbacks).
+    If scrip_master not yet downloaded, searches POPULAR_TOKENS as fallback.
     """
     query = (q or "").strip().upper()
+    # Build search corpus: live scrip_master + always include POPULAR_TOKENS for safety
+    # (so search works even before the scrip master finishes downloading)
+    corpus = list(scrip_master) if scrip_master else []
+    for p in POPULAR_TOKENS:
+        # Inject popular tokens if not already in corpus (same exchange+token)
+        if not any(s.get("token") == p["token"] and s.get("exchange") == p["exchange"] for s in corpus):
+            corpus.append({**p, "symbol_upper": p["symbol"].upper(), "name_upper": p["name"].upper(), "type": "EQ" if p["exchange"] in ("NSE","BSE") and "INDEX" not in p["name"] else "INDEX"})
+
     if not query or len(query) < 1:
-        # Show a small curated "popular" list only on empty focus (last resort)
-        featured = [s for s in scrip_master if s["symbol"].upper() in {
-            "NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX","NIFTYIT",
-            "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","BHARTIARTL",
-            "LT","AXISBANK","ITC","HINDUNILVR","MARUTI","ADANIENT","TATAMOTORS","TATASTEEL",
-            "WIPRO","TECHM","BAJFINANCE","ASIANPAINT","SUNPHARMA","ONGC","NTPC","KOTAKBANK",
-        }]
-        # If scrip_master failed to load, fall back to POPULAR_TOKENS
-        if not featured:
-            return {"results": POPULAR_TOKENS[:30]}
-        return {"results": featured[:30]}
+        # Popular list on empty focus
+        pop_syms = {p["symbol"].upper() for p in POPULAR_TOKENS}
+        featured = [s for s in corpus if s["symbol"].upper() in pop_syms][:30]
+        return {"results": featured}
 
     scored = []
     seen = set()
-    for s in scrip_master:
-        su = s["symbol_upper"]; nu = s["name_upper"]
-        if su in seen: continue
-        # Relevance score (higher = better match)
-        score = 0
-        if su == query:                          score += 1000  # exact symbol match
-        elif su.startswith(query):               score += 400   # symbol prefix
-        elif query in su:                        score += 200   # symbol substring
-        if nu == query:                          score += 300
-        elif nu.startswith(query):               score += 150
-        elif query in nu:                        score += 80
-        # Boost indices & liquid large-caps (simple heuristic: shorter name = big stock)
-        if s["type"] == "INDEX":                 score += 50
-        if len(su) <= 8 and s["type"] == "EQ":   score += 10    # shorter ticker ~ blue chip
+    for s in corpus:
+        su = s.get("symbol_upper") or s["symbol"].upper()
+        key = f"{s.get('exchange')}:{s.get('token')}"
+        if key in seen: continue
+        score = _score_item(s, query)
         if score > 0:
-            scored.append((-score, s))   # negative for ascending sort
+            seen.add(key)
+            scored.append((-score, s))
 
-    scored.sort(key=lambda x: (x[0], x[1]["symbol_upper"]))
+    scored.sort(key=lambda x: (x[0], x[1].get("symbol_upper", x[1].get("symbol", ""))))
     results = []
     for _, s in scored[:50]:
         results.append({
             "symbol": s["symbol"],
-            "name": s["name"],
+            "name": s.get("name", s["symbol"]),
             "token": s["token"],
             "exchange": s["exchange"],
             "type": s.get("type", "EQ"),
