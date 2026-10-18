@@ -105,16 +105,9 @@ class TVBridge {
                 });
             });
         });
-        // Sync crosshair across panes
-        keys.forEach(k => {
-            this.charts[k].subscribeCrosshairMove((param) => {
-                if (!param || !param.time) return;
-                keys.forEach(o => {
-                    if (o === k) return;
-                    this.charts[o].setCrosshairPosition(undefined, param.time, this.series.main, true);
-                });
-            });
-        });
+        // Note: crosshair is visually synced across panes because all charts share the
+        // same logical time range (via setVisibleLogicalRange sync). Skipping explicit
+        // setCrosshairPosition because LW v5 signature differs and causes "reading 'from'" errors.
     }
 
     _syncResize() {

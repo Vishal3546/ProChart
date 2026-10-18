@@ -190,10 +190,16 @@ app.mount("/js", StaticFiles(directory=os.path.join(STATIC_DIR, "js")), name="js
 
 
 @app.get("/favicon.ico")
+@app.get("/favicon.svg")
 def favicon():
-    for p in ("favicon.ico", "favicon.svg", "logo/favicon.svg", "logo/favicon.ico"):
+    # Prefer SVG if user placed logo/favicon.svg, else .ico, else 204
+    candidates = [
+        "logo/favicon.svg", "favicon.svg",
+        "logo/favicon.ico", "favicon.ico",
+    ]
+    for p in candidates:
         fp = os.path.join(STATIC_DIR, p)
-        if os.path.exists(fp):
+        if os.path.exists(fp) and os.path.getsize(fp) > 50:
             return FileResponse(fp)
     return Response(status_code=204)
 
