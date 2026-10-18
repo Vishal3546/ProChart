@@ -43,7 +43,7 @@ class App {
         this.source = 'SimulatedPro';
         this.marketOpen = true;
         this.signalFeed = [];
-        this.lastSignalKey = '';
+        this.lastSignalByKey = {};   // key → last pushed text (dedup per-channel)
         this.pollInFlight = false;
     }
 
@@ -504,10 +504,10 @@ class App {
     }
 
     _pushFeed(text, kind = 'neut', key = '') {
-        // De-dupe: same key+text within last 10s → skip
-        const sig = `${key}:${text}`;
-        if (sig === this.lastSignalKey) return;
-        this.lastSignalKey = sig;
+        // Per-channel deduplication: same key+text as last → skip
+        const channel = key || 'generic';
+        if (this.lastSignalByKey[channel] === text) return;
+        this.lastSignalByKey[channel] = text;
         const now = new Date(Date.now() + 5.5 * 3600 * 1000);
         const ts = now.toISOString().substr(11, 8) + ' IST';
         this.signalFeed.unshift({ ts, text, kind });
