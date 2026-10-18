@@ -43,6 +43,31 @@ def _format_mb(b):
     return f"{b / (1024*1024):.2f} MB"
 
 
+def _atomic_replace(src, dst, retries=8, delay=0.25):
+    """
+    Atomic rename with retries for Windows, where antivirus/Windows Search/
+    another Python process can briefly hold a file lock causing WinError 32.
+    Falls back to copy-then-remove if rename keeps failing.
+    """
+    import shutil
+    last_err = None
+    for i in range(retries):
+        try:
+            os.replace(src, dst)
+            return True
+        except OSError as e:
+            last_err = e
+            time.sleep(delay * (i + 1))  # linear backoff
+    try:
+        shutil.copy2(src, dst)
+        try: os.remove(src)
+        except: pass
+        _log(f"⚠ Rename locked; used copy fallback for {os.path.basename(dst)}")
+        return True
+    except Exception as e:
+        raise OSError(f"Could not replace {dst} after {retries} retries: {last_err}; copy also failed: {e}")
+
+
 def _build_index(raw):
     """Filter Angel One raw master into searchable index of EQ + INDEX + OPT+FUT."""
     out = []
@@ -177,8 +202,8 @@ def refresh_master(force=False):
                 json.dump(raw, f, separators=(",", ":"))
             with open(tmp_idx, "w", encoding="utf-8") as f:
                 json.dump(idx, f, separators=(",", ":"))
-            os.replace(tmp_raw, SCRIP_FILE)
-            os.replace(tmp_idx, INDEX_FILE)
+            _atomic_replace(tmp_raw, SCRIP_FILE)
+            _atomic_replace(tmp_idx, INDEX_FILE)
 
             _search_index = idx
             _last_refresh_ts = time.time()
