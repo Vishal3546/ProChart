@@ -140,15 +140,19 @@ class TVBridge {
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
         });
 
-        // 2) VOLUME — last value label hidden to avoid collision with RSI pane above
+        // 2) VOLUME — no price axis, no last-value label (TradingView pro style: bars only)
         this.charts.vol = this._makeChart('vol');
         this.series.vol = this.charts.vol.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: { type: 'volume' },
-            priceScaleId: 'right',
+            priceScaleId: 'vol',
             priceLineVisible: false,
             lastValueVisible: false,
         });
-        this.charts.vol.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0 } });
+        // Hide volume's right price axis entirely (prevents collision with RSI pane)
+        this.charts.vol.priceScale('vol').applyOptions({
+            scaleMargins: { top: 0.3, bottom: 0 },
+            visible: false,
+        });
 
         // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines
         this.charts.rsi = this._makeChart('rsi');
