@@ -162,7 +162,7 @@ class TVBridge {
         });
         this.charts.rsi.priceScale('right').applyOptions({
             scaleMargins: { top: 0.05, bottom: 0.05 },
-            autoScale: false,  // lock to 0-100 so levels never drift
+            autoScale: true,
         });
         try {
             this.series.rsi.createPriceLine({ price: 0,   color: '#2b2b43', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid,  axisLabelVisible: false });
@@ -322,20 +322,32 @@ class TVBridge {
 
     // ---------- RSI (sub-chart 3) ----------
     addRSI(period = 14) {
+        if (!this.series.rsi) {
+            // Recreate series if removed somehow
+            this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
+                color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
+            });
+        }
         const rsiData = TechnicalIndicators.RSI(this.currentData, period);
         this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value !== null));
-        // Lock RSI pane to 0-100 (custom autoscaleInfoProvider per LW v5 docs)
+        // Keep RSI pane autoscaled but with soft 0-100 margins (safe — LW docs pattern)
         try {
+            const opts = this.series.rsi.options();
+            const baseProv = opts.autoscaleInfoProvider;
             this.series.rsi.applyOptions({
-                autoscaleInfoProvider: () => ({
-                    priceRange: { minValue: 0, maxValue: 100 },
-                    margins: { top: 8, bottom: 8 },
-                }),
+                autoscaleInfoProvider: (...args) => {
+                    const res = baseProv ? baseProv(...args) : { priceRange: null, margins: { top: 4, bottom: 4 } };
+                    const pr = res.priceRange;
+                    // Don't shrink beyond 0/100; still allow the chart to pad slightly
+                    const minV = pr ? Math.min(pr.minValue, 5) : 5;
+                    const maxV = pr ? Math.max(pr.maxValue, 95) : 95;
+                    return {
+                        priceRange: { minValue: Math.max(0, minV - 5), maxValue: Math.min(100, maxV + 5) },
+                        margins: { top: 4, bottom: 4 },
+                    };
+                },
             });
-        } catch (e) {
-            // Fallback: set priceScale min/max via visible range (older LW builds)
-            try { this.charts.rsi.priceScale('right').applyOptions({ autoScale: false }); } catch (_) {}
-        }
+        } catch (e) { /* if the above is unsupported, leave default autoscale (safe) */ }
     }
 
     // ---------- clear / markers ----------
