@@ -122,19 +122,12 @@ class App {
 
     _onLiveTick(t) {
         if (!t || !t.ltp) return;
-        const prevPrice = this.lastLtp || t.ltp;
+        const prevClose = this.prevClose || t.prev_close || t.ltp;
         this.lastLtp = t.ltp;
-        const prev = this.prevClose || t.prev_close || t.ltp;
-        this.updateHeaderPrice(t.ltp, t.ltp - prev);
+        this.updateHeaderPrice(t.ltp, t.ltp - prevClose);
         const spot = document.getElementById('greekSpot');
         if (spot) spot.value = t.ltp.toFixed(2);
-        // Blink green dot ONLY when market is actually live & we got a fresh tick
-        if (this.marketOpen && !this.isHoliday) {
-            const lh = document.getElementById('connDot');
-            if (lh) { lh.style.transform = 'scale(1.3)'; }
-            clearTimeout(this._hbT);
-            this._hbT = setTimeout(() => { if (lh) lh.style.transform = 'scale(1)'; }, 250);
-        }
+        // Up → green, Down → red (no pulse animation; static color only)
     }
 
     _onLiveCandle(c) {

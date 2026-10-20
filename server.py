@@ -603,15 +603,13 @@ def get_candles(
                     return candle_cache[cache_key][1]
             print(f"⚠️ Candle Fetch Exception: {e}")
 
-    # ---- Fallback: simulated realistic random walk ----
-    # When market is closed or we already have a cached simulated snapshot, keep serving that
-    # (no random jitter after hours — matches "frozen close" expectation).
+    # ---- Fallback: realistic historical random walk ----
+    # Don't serve STALE "SimulatedPro" cache when AngelOne data exists — prefer
+    # re-fetching (even if market is closed) because Angel serves 2y of daily history.
     if cache_key in candle_cache:
         cached_time, cached_data = candle_cache[cache_key]
-        # If cached and market closed / rate limited / live failed → reuse
-        if cached_data and cached_data.get("candles"):
-            if not market_open or cached_data.get("source") == "SimulatedPro":
-                return cached_data
+        if cached_data and cached_data.get("candles") and cached_data.get("source") != "SimulatedPro":
+            return cached_data
 
     interval_ms_map = {"1": 60, "3": 180, "5": 300, "15": 900, "30": 1800, "60": 3600, "D": 86400}
     step_s = interval_ms_map.get(interval, 900)
@@ -622,29 +620,27 @@ def get_candles(
             base = item.get("base", 1500.0)
             break
 
-    count = 160
+    count = 160 if interval != "D" else 500  # daily needs 2yr bars = ~500 candles
     end_ts = int(now_ts)
     end_ts = end_ts - (end_ts % step_s)
     start_time = end_ts - (count - 1) * step_s
 
-    # When market is closed, produce a frozen close bar instead of random drift
-    jitter = market_open  # True = random walk, False = flat at base
+    # Always produce a realistic historical walk (including trends + noise) even when
+    # market is closed so daily/weekly charts don't look like flat lines.
     candles = []
-    p = base
+    p = base * (0.85 + random.random() * 0.3)  # random start a bit off
+    vol_base = 100000 if step_s < 86400 else 5_000_000
     for i in range(count):
-        if jitter:
-            change = (random.random() - 0.5) * (base * 0.0018) * (1 + 0.3 * random.random())
-        else:
-            change = 0
+        # Mean-reverting random walk with small drift
+        drift = (base - p) * 0.002 + (random.random() - 0.5) * base * (0.012 if step_s == 86400 else 0.0025)
         o = p
-        c = o + change
-        if jitter:
-            h = max(o, c) + random.random() * base * 0.0007
-            l = min(o, c) - random.random() * base * 0.0007
-        else:
-            h = max(o, c) + base * 0.0001
-            l = min(o, c) - base * 0.0001
-        v = int(100000 + (random.random() * 600000 if jitter else 0))
+        c = o + drift
+        spread = abs(drift) + base * (0.005 if step_s == 86400 else 0.0012)
+        h = max(o, c) + random.random() * spread
+        l = min(o, c) - random.random() * spread
+        v = int(vol_base + random.random() * vol_base * 2)
+        # Make sure h>=l and valid
+        if h < l: h, l = l, h
         candles.append({
             "time": int(start_time + i * step_s),
             "open": round(o, 2),

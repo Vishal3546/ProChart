@@ -80,7 +80,7 @@ class TVBridge {
                 borderColor: '#2b2b43',
                 borderVisible: true,
                 alignLabels: true,
-                minimumWidth: 68,      // uniform across ALL panes so vertical grid aligns
+                minimumWidth: 72,      // uniform across ALL panes for vertical grid alignment
                 scaleMargins: { top: 0.05, bottom: 0.05 },
             },
             leftPriceScale: { visible: false },
@@ -122,7 +122,6 @@ class TVBridge {
                 const el = this.paneEls[k];
                 c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
             });
-            this._alignPriceAxes();
         };
         if (window.ResizeObserver) {
             this._resizeObserver = new ResizeObserver(resize);
@@ -130,65 +129,16 @@ class TVBridge {
         } else {
             window.addEventListener('resize', resize);
         }
-        // Re-run alignment multiple times because LW adjusts axis width AFTER rendering
-        // (digits change, e.g. 1160.00 → 73852.90 → axis grows 78px; sub-panes must follow).
-        setTimeout(resize, 50);
-        setTimeout(resize, 250);
-        setTimeout(resize, 600);
-        setTimeout(resize, 1200);
-        // Poll every second for 5s after init (covers data load + indicator label rendering)
-        let ticks = 0;
-        this._alignInterval = setInterval(() => {
-            this._alignPriceAxes();
-            ticks++;
-            if (ticks >= 8) clearInterval(this._alignInterval);
-        }, 500);
+        // Let LW render, then do ONE alignment pass after layout settles.
+        // No interval polling, no forced canvas widths — just set minimumWidth
+        // on every price scale to the widest label content (LW will honour it).
+        setTimeout(resize, 60);
     }
 
     _alignPriceAxes() {
-        try {
-            const getAxisWidth = (chartEl) => {
-                if (!chartEl) return 0;
-                const tbl = chartEl.querySelector('table');
-                if (!tbl) return 0;
-                const cells = tbl.querySelectorAll('td');
-                const axisCell = cells[cells.length - 1];
-                return axisCell ? axisCell.getBoundingClientRect().width : 0;
-            };
-            const mainEl = this.paneEls.main;
-            const targetW = Math.round(getAxisWidth(mainEl));
-            if (!targetW) return;
-            ['vol', 'rsi', 'macd'].forEach(k => {
-                const el = this.paneEls[k];
-                if (!el) return;
-                const tbl = el.querySelector('table');
-                if (!tbl) return;
-                const cells = tbl.querySelectorAll('td');
-                const axisCell = cells[cells.length - 1];
-                const plotCell = cells[0];
-                if (axisCell) {
-                    axisCell.style.width = targetW + 'px';
-                    axisCell.style.minWidth = targetW + 'px';
-                    axisCell.style.maxWidth = targetW + 'px';
-                    axisCell.style.boxSizing = 'border-box';
-                    axisCell.querySelectorAll('div, canvas').forEach(n => {
-                        n.style.width = targetW + 'px';
-                        if (n.tagName === 'CANVAS') {
-                            // Only touch canvas if its DOM width differs; avoid flickering redraws
-                            const cur = n.getBoundingClientRect().width;
-                            if (Math.abs(cur - targetW) > 1) {
-                                n.style.width = targetW + 'px';
-                            }
-                        }
-                    });
-                }
-                if (plotCell) {
-                    plotCell.style.width = (el.clientWidth - targetW) + 'px';
-                }
-            });
-            // Cache so polling can detect changes
-            this._lastAxisW = targetW;
-        } catch (e) { /* alignment best-effort */ }
+        // NO-OP: rely on minimumWidth: 72 set uniformly on all scales so LW
+        // allocates the same axis width to every pane. Manual DOM overrides
+        // cause duplicate labels and canvas blurs (v5 recalculates on its own).
     }
 
     // ---------- init ----------
@@ -221,7 +171,7 @@ class TVBridge {
             visible: true,
             textColor: 'transparent',   // hide numeric labels (200K etc.)
             drawTicks: false,            // hide tick marks
-            minimumWidth: 68,            // MUST equal other panes — key to vertical alignment
+            minimumWidth: 72,            // MUST equal other panes — key to vertical alignment
         });
 
         // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines
@@ -232,7 +182,7 @@ class TVBridge {
         this.charts.rsi.priceScale('right').applyOptions({
             scaleMargins: { top: 0.08, bottom: 0.08 },
             autoScale: true,
-            minimumWidth: 68,
+            minimumWidth: 72,
         });
         try {
             this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
@@ -254,7 +204,7 @@ class TVBridge {
                 lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false, title: '0',
             });
         } catch (e) {}
-        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 68 });
+        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 72 });
 
         // Disable wheel/scroll/horiz drag on sub-charts so main chart drives it
         ['vol', 'rsi', 'macd'].forEach(k => {
@@ -401,6 +351,13 @@ class TVBridge {
         try {
             const rsiData = TechnicalIndicators.RSI(this.currentData, period);
             this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value != null && isFinite(d.value)));
+            // Set RSI to 0-100 fixed price range via autoscaleInfoProvider (LW v5 safe)
+            this.series.rsi.applyOptions({
+                autoscaleInfoProvider: () => ({
+                    priceRange: { minValue: 0, maxValue: 100 },
+                    margins: { above: 4, below: 4 },
+                }),
+            });
         } catch (e) { console.warn('RSI setData failed', e); }
     }
 
