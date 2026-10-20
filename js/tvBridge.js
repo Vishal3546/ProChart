@@ -146,20 +146,23 @@ class TVBridge {
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
         });
 
-        // 2) VOLUME — same width right axis as main/RSI/MACD so vertical grid lines align perfectly
+        // 2) VOLUME — right axis reserved width with INVISIBLE labels so vertical grid
+        //    aligns perfectly with main/RSI/MACD panes (TradingView-pro look)
         this.charts.vol = this._makeChart('vol');
         this.series.vol = this.charts.vol.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: { type: 'volume' },
-            priceScaleId: 'vol',
+            priceScaleId: 'right',
             priceLineVisible: false,
             lastValueVisible: false,
         });
-        this.charts.vol.priceScale('vol').applyOptions({
+        this.charts.vol.priceScale('right').applyOptions({
             scaleMargins: { top: 0.3, bottom: 0 },
             borderVisible: true,
             borderColor: '#2b2b43',
-            alignLabels: false,   // don't draw numeric labels
-            minimumWidth: 60,    // MUST match other panes so right edge aligns
+            visible: true,
+            textColor: 'transparent',   // hide numeric labels (200K etc.)
+            drawTicks: false,            // hide tick marks
+            minimumWidth: 60,            // MUST equal other panes — key to vertical alignment
         });
 
         // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines
