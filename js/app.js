@@ -489,21 +489,29 @@ class App {
 
         if (candles && candles.length > 0) {
             this.tvBridge.setCandleData(candles);
-            // Schedule indicators + analytics AFTER LW has finished rendering the
-            // new data so RSI/MACD/vol panes populate correctly on first load / TF switch.
             requestAnimationFrame(() => {
                 this.applyIndicators();
                 this.runAllAnalytics(candles);
             });
             const last = candles[candles.length - 1];
-            // Use the FIRST candle's open as prevClose baseline? NO — use previous day's
-            // close for %change (first candle's open if no prior day; otherwise compute
-            // from the day's opening bar).
-            // The prev bar close (candles[-2]) is just last 15min bar, not previous day.
-            // We pass raw change in points; %change is calculated from today's open if available.
-            const todayOpen = candles[0].open;
-            // For intraday TF, find the bar closest to 09:15 IST for today; fallback to first bar
-            this.prevClose = todayOpen;
+            // Find TODAY'S opening candle for correct %change baseline:
+            // For intraday TFs (<=60min) — find the first bar whose time is >= today 09:15 IST.
+            // For daily TF — use the PREVIOUS day's close (first candle's open = start of dataset).
+            let dayOpen = candles[0].open;
+            if (this.activeTimeframe !== 'D') {
+                const now = new Date();
+                const istOffset = 5.5 * 3600 * 1000;
+                const istNow = new Date(now.getTime() + istOffset);
+                const istY = istNow.getUTCFullYear(), istM = istNow.getUTCMonth(), istD = istNow.getUTCDate();
+                const dayStart = Date.UTC(istY, istM, istD, 3, 45, 0); // 09:15 IST = 03:45 UTC
+                for (let i = 0; i < candles.length; i++) {
+                    if (candles[i].time * 1000 >= dayStart) { dayOpen = candles[i].open; break; }
+                }
+            } else {
+                // Daily: previous day close as baseline
+                dayOpen = candles.length > 1 ? candles[candles.length - 2].close : candles[0].open;
+            }
+            this.prevClose = dayOpen;
             this.lastLtp = last.close;
             const spot = document.getElementById('greekSpot'); if (spot && this.lastLtp) spot.value = this.lastLtp.toFixed(2);
             this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
