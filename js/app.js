@@ -34,6 +34,7 @@ class App {
         this.closingTrapEngine = new ClosingTrapEngine();
         this.absEngine = new OrderFlowAbsorptionEngine();
         this.bigCandleDetector = new BigCandleDetector();
+        this.nextCandlePredictor = new NextCandlePredictor();
         this.greeksEngine = new GreeksEngine();
 
         this.pollingInterval = null;
@@ -530,20 +531,26 @@ class App {
     runAllAnalytics(data) {
         if (!data || data.length < 5) return;
 
-        // Candle patterns
+        // Skip noisy analytics on simulated data / market closed / holidays —
+        // random-walk fallback generates false BUY ABSORPTION / W-BOTTOM / VCP
+        // signals that aren't real. Show dashboard metrics but suppress signal
+        // feed push.
+        const isRealData = this.source === 'AngelOne' && this.marketOpen && !this.isHoliday;
+
+        // Candle patterns (markers are harmless visual overlays)
         try {
             const markers = this.candlePatternEngine.scanAll(data, this.patternSettings);
             this.tvBridge.setMarkers(markers);
         } catch (e) { console.warn('candlePatterns err', e); }
 
-        // Master Pro dashboard
+        // Master Pro dashboard — always show values, but skip feed push when not live
         try {
             const mp = this.proEngine.analyze(data);
             this._setMetric('signalSqueeze', mp.squeeze.label, mp.squeeze.level);
             this._setMetric('signalVsa', mp.vsa.label, mp.vsa.level);
             this._setMetric('signalMacd', mp.macd.label, mp.macd.level);
             this._setMetric('signalRsi', mp.rsi.label, mp.rsi.level);
-            this._pushFeed(`MASTER: ${mp.macd.label} / ${mp.vsa.label}`, mp.score >= 1 ? 'bull' : (mp.score <= -1 ? 'bear' : 'neut'), 'master');
+            if (isRealData) this._pushFeed(`MASTER: ${mp.macd.label} / ${mp.vsa.label}`, mp.score >= 1 ? 'bull' : (mp.score <= -1 ? 'bear' : 'neut'), 'master');
         } catch (e) { console.warn('masterPro err', e); }
 
         // Breakout checklist
@@ -554,7 +561,7 @@ class App {
                 chk.className = `checklist-status text-${bo.level === 'muted' ? 'muted' : bo.level}`;
                 chk.innerHTML = `<div>${bo.trend}</div><div style="margin-top:4px;font-size:11px;opacity:0.8;">${bo.score}/6 — ${bo.reasons.join(' • ')}</div>`;
             }
-            if (bo.score >= 5) this._pushFeed(`Breakout: ${bo.trend}`, 'bull', 'bo');
+            if (isRealData && bo.score >= 5) this._pushFeed(`Breakout: ${bo.trend}`, 'bull', 'bo');
         } catch (e) { console.warn('breakout err', e); }
 
         // VCP
@@ -562,7 +569,7 @@ class App {
             try {
                 const v = this.vcpEngine.scan(data);
                 this._setMetric('vcpResult', v.label, v.level);
-                if (v.detected) this._pushFeed(`VCP: ${v.label}`, 'bull', 'vcp');
+                if (isRealData && v.detected) this._pushFeed(`VCP: ${v.label}`, 'bull', 'vcp');
             } catch (e) {}
         } else { this._setMetric('vcpResult', '⚪ OFF', 'muted'); }
 
@@ -571,7 +578,7 @@ class App {
             try {
                 const d = this.dblEngine.scan(data);
                 this._setMetric('dblResult', d.label, d.level);
-                if (d.detected) this._pushFeed(`${d.pattern}: ${d.label}`, d.level === 'success' ? 'bull' : 'bear', 'dbl');
+                if (isRealData && d.detected) this._pushFeed(`${d.pattern}: ${d.label}`, d.level === 'success' ? 'bull' : 'bear', 'dbl');
             } catch (e) {}
         } else { this._setMetric('dblResult', '⚪ OFF', 'muted'); }
 
@@ -580,7 +587,7 @@ class App {
             try {
                 const f = this.flagEngine.scan(data);
                 this._setMetric('flagResult', f.label, f.level);
-                if (f.detected) this._pushFeed(`Flag: ${f.label}`, f.dir === 'bull' ? 'bull' : 'bear', 'flag');
+                if (isRealData && f.detected) this._pushFeed(`Flag: ${f.label}`, f.dir === 'bull' ? 'bull' : 'bear', 'flag');
             } catch (e) {}
         } else { this._setMetric('flagResult', '⚪ OFF', 'muted'); }
 
@@ -590,7 +597,7 @@ class App {
                 const rsiArr = TechnicalIndicators.RSI(data, 14);
                 const d = this.divEngine.scanDivergences(data, rsiArr);
                 this._setMetric('divResult', d.label, d.level);
-                if (d.detected) this._pushFeed(`Divergence: ${d.label}`, d.direction === 'bullish' ? 'bull' : 'bear', 'div');
+                if (isRealData && d.detected) this._pushFeed(`Divergence: ${d.label}`, d.direction === 'bullish' ? 'bull' : 'bear', 'div');
             } catch (e) {}
         } else { this._setMetric('divResult', '⚪ OFF', 'muted'); }
 
@@ -599,7 +606,7 @@ class App {
             try {
                 const t = this.closingTrapEngine.analyze(data, this.activeTimeframe);
                 this._setMetric('trapResult', t.label, t.level);
-                if (t.trap) this._pushFeed(`Trap: ${t.label}`, t.direction === 'bull' ? 'bull' : 'bear', 'trap');
+                if (isRealData && t.trap) this._pushFeed(`Trap: ${t.label}`, t.direction === 'bull' ? 'bull' : 'bear', 'trap');
             } catch (e) {}
         } else { this._setMetric('trapResult', '⚪ OFF', 'muted'); }
 
@@ -608,7 +615,7 @@ class App {
             try {
                 const a = this.absEngine.scan(data);
                 this._setMetric('absResult', a.label, a.level);
-                if (a.detected && a.signals.length) {
+                if (isRealData && a.detected && a.signals.length) {
                     const last = a.signals[a.signals.length - 1];
                     this._pushFeed(`Absorption: ${last.text}`, last.level === 'danger' ? 'bear' : 'bull', 'abs');
                 }
@@ -619,10 +626,32 @@ class App {
         try {
             const bc = this.bigCandleDetector.analyze(data, this.activeTimeframe);
             this._setMetric('bigCandleResult', bc.label, bc.level);
-            if (bc.fresh) {
+            if (isRealData && bc.fresh) {
                 const volTxt = bc.volRatio ? ` (vol ${bc.volRatio.toFixed(1)}x)` : '';
                 this._pushFeed(`${bc.dir === 'bull' ? '🚀' : '🔻'} Big ${bc.dir} candle ${bc.magnitude.toFixed(1)}x forming${volTxt}`, bc.dir, 'big');
                 this.toast(`Big ${bc.dir} candle forming!`, bc.dir === 'bull' ? 'success' : 'danger', 3000);
+            }
+        } catch (e) {}
+
+        // Next candle AI forecast
+        try {
+            const nc = this.nextCandlePredictor.analyze(data);
+            let label = '—', level = 'muted';
+            if (nc.direction === 'bull') {
+                label = `🟢 BULL ${nc.confidence.toUpperCase()} (${nc.score >= 0 ? '+' : ''}${nc.score})`;
+                level = nc.confidence === 'high' ? 'success' : nc.confidence === 'med' ? 'info' : 'muted';
+            } else if (nc.direction === 'bear') {
+                label = `🔴 BEAR ${nc.confidence.toUpperCase()} (${nc.score})`;
+                level = nc.confidence === 'high' ? 'danger' : nc.confidence === 'med' ? 'warning' : 'muted';
+            } else {
+                label = `⚪ NEUTRAL (${nc.score})`;
+                level = 'muted';
+            }
+            this._setMetric('nextCandleResult', label, level);
+            const reasons = document.getElementById('nextCandleReasons');
+            if (reasons) {
+                reasons.innerHTML = (nc.factors || []).slice(0, 3).map(f =>
+                    `<div style="font-size:10px;opacity:0.75;padding:1px 0;">• ${f}</div>`).join('');
             }
         } catch (e) {}
     }

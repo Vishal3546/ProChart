@@ -704,8 +704,11 @@ if __name__ == "__main__":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except Exception:
             pass
-    # Suppress noisy asyncio/uvicorn tracebacks (browser disconnect = normal)
+    # Suppress noisy asyncio/uvicorn tracebacks (browser disconnect + Ctrl+C = normal)
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+    logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
+    logging.getLogger("starlette").setLevel(logging.ERROR)
+    logging.getLogger("fastapi").setLevel(logging.ERROR)
     for _log in ("uvicorn.error", "uvicorn.access", "uvicorn"):
         logging.getLogger(_log).handlers = []  # reset; let uvicorn configure
 
