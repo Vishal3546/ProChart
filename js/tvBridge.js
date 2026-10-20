@@ -80,7 +80,7 @@ class TVBridge {
                 borderColor: '#2b2b43',
                 borderVisible: true,
                 alignLabels: true,
-                minimumWidth: 58,      // reserves space for axis labels like "70.00" / "MACD -0.85"
+                minimumWidth: 60,      // uniform across ALL panes so vertical grid aligns
                 scaleMargins: { top: 0.05, bottom: 0.05 },
             },
             leftPriceScale: { visible: false },
@@ -146,7 +146,7 @@ class TVBridge {
             borderVisible: false, wickUpColor: '#089981', wickDownColor: '#f23645',
         });
 
-        // 2) VOLUME — no price axis, no last-value label (TradingView pro style: bars only)
+        // 2) VOLUME — same width right axis as main/RSI/MACD so vertical grid lines align perfectly
         this.charts.vol = this._makeChart('vol');
         this.series.vol = this.charts.vol.addSeries(LightweightCharts.HistogramSeries, {
             priceFormat: { type: 'volume' },
@@ -154,10 +154,12 @@ class TVBridge {
             priceLineVisible: false,
             lastValueVisible: false,
         });
-        // Hide volume's right price axis entirely (prevents collision with RSI pane)
         this.charts.vol.priceScale('vol').applyOptions({
             scaleMargins: { top: 0.3, bottom: 0 },
-            visible: false,
+            borderVisible: true,
+            borderColor: '#2b2b43',
+            alignLabels: false,   // don't draw numeric labels
+            minimumWidth: 60,    // MUST match other panes so right edge aligns
         });
 
         // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines

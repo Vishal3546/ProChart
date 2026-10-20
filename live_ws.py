@@ -130,13 +130,17 @@ class LiveTickClient:
     def stop(self):
         """Stop the WS and its thread (called on server shutdown)."""
         self._should_run = False
-        try:
-            if self._ws is not None:
-                self._ws.close_connection()
-        except Exception:
-            pass
         self._connected = False
+        ws_ref = self._ws
         self._ws = None
+        # Close on a short-lived thread so we don't block uvicorn's shutdown
+        def _do_close():
+            try:
+                if ws_ref is not None:
+                    ws_ref.close_connection()
+            except Exception:
+                pass
+        threading.Thread(target=_do_close, daemon=True).start()
 
     def set_credentials(self, api_key: str, client_code: str, auth_token: str, feed_token: str):
         """Update credentials after session refresh; reconnect."""
@@ -161,22 +165,23 @@ class LiveTickClient:
             self._subscribed[key] = {"exchangeType": ex_type(exchange), "token": token}
             if self._connected and self._ws is not None:
                 try:
-                    self._ws.subscribe(self._corr, self._mode, [self._exch_token_list()])
-                    log.info(f"WS subscribe: {key} (total {len(self._subscribed)})")
+                    # _exch_token_list() already returns a LIST of dicts (one per exchange)
+                    self._ws.subscribe(self._corr, self._mode, self._exch_token_list(action=1))
+                    log.info(f"🔔 WS subscribe: {key} (total {len(self._subscribed)})")
                 except Exception as e:
                     log.warning(f"WS subscribe failed for {key}: {e}")
             return True
 
     def unsubscribe_all(self):
-        """Unsubscribe all tokens (e.g. on server shutdown or symbol switch of multi-sym)."""
+        """Unsubscribe all tokens (e.g. on server shutdown or symbol switch)."""
         with self._lock:
             if not self._subscribed:
                 return
             if self._connected and self._ws is not None:
                 try:
                     tl = self._exch_token_list(action=0)
-                    for group in tl.values():
-                        self._ws.unsubscribe(self._corr, self._mode, [group])
+                    # tl is a LIST of dicts — unsubscribe the whole payload
+                    self._ws.unsubscribe(self._corr, self._mode, tl)
                 except Exception as e:
                     log.warning(f"WS unsubscribe all failed: {e}")
             self._subscribed.clear()
@@ -247,9 +252,9 @@ class LiveTickClient:
             return
         try:
             payload = self._exch_token_list(action=1)
-            for group in payload:
-                self._ws.subscribe(self._corr, self._mode, [group])
-            log.info(f"WS resubscribed to {len(self._subscribed)} tokens")
+            if payload:
+                self._ws.subscribe(self._corr, self._mode, payload)
+                log.info(f"🔔 WS resubscribed to {len(self._subscribed)} tokens (mode={self._mode})")
         except Exception as e:
             log.warning(f"WS refresh subscriptions failed: {e}")
 
@@ -291,9 +296,8 @@ class LiveTickClient:
                     with self._lock:
                         try:
                             payload = self._exch_token_list(action=1)
-                            for group in payload:
-                                ws.subscribe(self._corr, self._mode, [group])
                             if payload:
+                                ws.subscribe(self._corr, self._mode, payload)
                                 log.info(f"🔔 WS subscribed to {len(self._subscribed)} tokens (mode={self._mode})")
                         except Exception as e:
                             log.warning(f"subscribe on_open failed: {e}")
@@ -326,7 +330,11 @@ class LiveTickClient:
                 break
             delay = min(self._reconnect_delay, 60)
             log.info(f"⏳ Reconnecting in {delay}s...")
-            time.sleep(delay)
+            # Interruptible sleep (so Ctrl+C doesn't wait full delay)
+            waited = 0.0
+            while self._should_run and waited < delay:
+                time.sleep(0.25)
+                waited += 0.25
             self._reconnect_delay = min(self._reconnect_delay * 2, 60)
 
         log.info("WS thread exited (should_run=False)")
