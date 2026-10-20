@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
 # Professional scrip master loader (streaming download w/ progress, atomic save, daily 8:45 AM IST refresh)
 from scrip_loader import (
@@ -41,6 +41,9 @@ from scrip_loader import (
     INDEX_FILE as SCRIP_INDEX_FILE,
     SCRIP_FILE as SCRIP_RAW_FILE,
 )
+
+# Live WebSocket client (SmartWebSocketV2, auto-reconnect, tick cache, forming candle builder)
+from live_ws import live_ws, ex_type as ws_ex_type
 
 # SmartApi SDK — try both capitalizations; graceful fallback if not installed.
 # smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
@@ -64,6 +67,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 smart_api = None
 session_data = None
 jwt_token = None
+feed_token = None
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Popular / featured tokens — only used as candle-simulation fallback & empty-query popular list
@@ -109,7 +113,7 @@ def get_mac():
 
 
 def login_smart_api():
-    global smart_api, session_data, jwt_token
+    global smart_api, session_data, jwt_token, feed_token
     if SmartConnect is None:
         print("⚠️ SmartApi SDK not installed; running in simulated-only mode.")
         return False
@@ -122,7 +126,25 @@ def login_smart_api():
         session_data = smart_api.generateSession(CLIENT_CODE, PIN, totp)
         if session_data and session_data.get("status"):
             jwt_token = session_data["data"]["jwtToken"]
+            refreshToken = session_data["data"].get("refreshToken", "")
+            # Feed token is required for WS V2. Some accounts return it directly,
+            # others need a separate getfeedToken() call.
+            ft = session_data["data"].get("feedToken")
+            if not ft:
+                try:
+                    ft_res = smart_api.getfeedToken()
+                    if isinstance(ft_res, dict) and ft_res.get("status"):
+                        ft = ft_res["data"].get("feedToken")
+                except Exception as e:
+                    print(f"⚠️ getfeedToken() failed: {e}")
+            feed_token = ft or ""
             print("✅ Angel One Login SUCCESSFUL!")
+            # Start (or refresh) live WebSocket with fresh tokens
+            if feed_token:
+                live_ws.start(API_KEY, CLIENT_CODE, jwt_token, feed_token, mode=2)
+                print("🔌 WebSocket starting (mode=2: Quote)...")
+            else:
+                print("⚠️ No feed_token received — WS disabled this session")
             return True
         print(f"⚠️ Angel One login failed: {session_data}")
     except Exception as e:
@@ -153,6 +175,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         task.cancel()
+        live_ws.stop()
+        print("🔌 WebSocket stopped")
 
 
 app = FastAPI(title="ProChart Terminal Engine v2026.10", lifespan=lifespan)
@@ -214,9 +238,11 @@ def status():
     weekday = now_ist.weekday()
     hhmm = now_ist.hour * 100 + now_ist.minute
     market_open = (weekday < 5) and (915 <= hhmm < 1530)
+    ws_stat = live_ws.status()
     return {
         "status": "online",
         "angel_connected": bool(smart_api and jwt_token),
+        "ws": ws_stat,
         "symbols_count": scrip_count(),
         "scrip_loaded": scrip_ready(),
         "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
@@ -376,6 +402,84 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
     return {"status": False, "message": "Fetch failed"}
 
 
+# ------------- LIVE WEBSOCKET ENDPOINTS -------------
+
+@app.post("/api/ws/subscribe")
+async def ws_subscribe(req: Request):
+    """Tell the backend Angel WS to subscribe to exactly one token (for current chart)."""
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    exchange = (body.get("exchange") or "NSE").strip().upper()
+    token = str(body.get("token") or "").strip()
+    if not token:
+        return {"status": False, "message": "token required"}
+    if not feed_token:
+        return {"status": False, "message": "WS not available (check login/feedToken)", "ws": live_ws.status()}
+    live_ws.subscribe_only(exchange, token)
+    return {"status": True, "ws": live_ws.status()}
+
+
+@app.get("/api/ws/status")
+def ws_status():
+    return live_ws.status()
+
+
+@app.get("/api/ticks/stream")
+async def ticks_stream(exchange: str = "NSE", token: str = "", interval: str = "15"):
+    """
+    Server-Sent Events (SSE) stream that pushes:
+      - 'tick' events: every LTP tick (throttled to ~5/sec per client)
+      - 'candle' events: whenever the forming candle changes (so the chart can update without polling)
+    Browser connects via EventSource('/api/ticks/stream?exchange=NSE&token=2885&interval=15').
+    """
+    from fastapi.responses import StreamingResponse as _SR
+    exchange = (exchange or "NSE").strip().upper()
+    token = str(token or "").strip()
+    et = ws_ex_type(exchange)
+
+    async def event_gen():
+        last_tick_ts = 0.0
+        last_candle_key = None
+        # Send initial status immediately so browser knows stream is alive
+        yield f"event: status\ndata: {json.dumps(live_ws.status())}\n\n"
+        # Kick off subscription if not yet done
+        if token and feed_token:
+            live_ws.subscribe(exchange, token)
+        # Poll loop (non-blocking via asyncio.sleep)
+        while True:
+            await asyncio.sleep(0.2)  # 5 Hz throttle
+            # Tick updates
+            q = live_ws.quote(exchange, token)
+            now_ts = time.time()
+            if q and (now_ts - last_tick_ts) >= 0.25:
+                last_tick_ts = now_ts
+                payload = {
+                    "ltp": q["ltp"], "day_open": q["day_open"],
+                    "day_high": q["day_high"], "day_low": q["day_low"],
+                    "volume": q["day_volume"], "oi": q.get("oi", 0),
+                    "prev_close": q["prev_close"],
+                    "ts": now_ts,
+                }
+                yield f"event: tick\ndata: {json.dumps(payload)}\n\n"
+            # Forming candle updates (only when changed)
+            fc = live_ws.forming_candle(exchange, token, interval)
+            if fc:
+                ck = f"{fc['time']}_{fc['close']}_{fc['volume']}"
+                if ck != last_candle_key:
+                    last_candle_key = ck
+                    yield f"event: candle\ndata: {json.dumps(fc)}\n\n"
+
+    headers = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return _SR(event_gen(), headers=headers, media_type="text/event-stream")
+
+
 @app.get("/api/candles")
 def get_candles(
     symbol: str = "NIFTY",
@@ -481,7 +585,7 @@ def get_candles(
                     candle_cache[cache_key] = (now_ts, out)
                     cache_cleanup()
                     live_ok = True
-                    return out
+                    return _merge_live_candle(out, exchange, token, interval, market_open)
         except Exception as e:
             msg = str(e)
             if "Access denied" in msg or "exceeding access rate" in msg:
@@ -547,6 +651,42 @@ def get_candles(
            "market_open": market_open}
     candle_cache[cache_key] = (now_ts, out)
     cache_cleanup()
+    return _merge_live_candle(out, exchange, token, interval, market_open)
+
+
+def _merge_live_candle(out: dict, exchange: str, token: str, interval: str, market_open: bool):
+    """
+    If the WebSocket has a forming candle for this exchange/token/tf, merge it onto the
+    last historical candle (or append a new one if history is one bar behind).
+    This makes the REST candle response itself reflect live WS data without requiring
+    the frontend to wait for SSE.
+    """
+    if not out or not out.get("candles") or not market_open:
+        return out
+    try:
+        fc = live_ws.forming_candle(exchange, token, interval)
+        if not fc:
+            return out
+        cs = out["candles"]
+        last = cs[-1]
+        if last.get("time") == fc["time"]:
+            # Same bucket → update last candle with live forming OHLCV
+            last["open"] = fc["open"]
+            last["high"] = max(last.get("high", fc["high"]), fc["high"])
+            last["low"] = min(last.get("low", fc["low"]), fc["low"])
+            last["close"] = fc["close"]
+            # Volume from forming-candle is delta-vol since bucket start; add to prior close volume if any
+            last["volume"] = int(fc["volume"] or last.get("volume", 0))
+        elif fc["time"] > last.get("time", 0):
+            # New bucket (history hasn't caught up yet) → append
+            cs.append({
+                "time": fc["time"], "open": fc["open"], "high": fc["high"],
+                "low": fc["low"], "close": fc["close"], "volume": int(fc["volume"]),
+            })
+        out["candles"] = cs
+        out["ws_live"] = True
+    except Exception as e:
+        print(f"⚠️ merge live candle failed: {e}")
     return out
 
 

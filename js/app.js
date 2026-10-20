@@ -46,6 +46,9 @@ class App {
         this.signalFeed = [];
         this.lastSignalByKey = {};   // key → last pushed text (dedup per-channel)
         this.pollInFlight = false;
+        this.liveEventSource = null;
+        this.liveWsConnected = false;
+        this.lastTickVolume = 0;
     }
 
     async init() {
@@ -59,7 +62,104 @@ class App {
         this.startClock();
         await this.checkServerStatus();
         await this.loadChartData(this.activeSymbol, this.activeTimeframe);
-        this.startLiveQuotePolling();
+        this.connectLiveStream();   // WebSocket-backed SSE (realtime)
+        this.startLiveQuotePolling();  // fallback/poll every 10s for LTP sanity
+    }
+
+    // --------------- LIVE WS (SSE) ---------------
+    connectLiveStream() {
+        if (this.liveEventSource) {
+            try { this.liveEventSource.close(); } catch (e) {}
+            this.liveEventSource = null;
+        }
+        // Kick off backend WS subscription to current token
+        try {
+            fetch('/api/ws/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ exchange: this.activeExchange, token: this.activeToken }),
+                cache: 'no-store',
+            }).then(r => r.json()).then(j => {
+                if (j.status && j.ws && j.ws.connected) {
+                    console.log(`🔌 Live WS subscribed: ${this.activeExchange}:${this.activeToken} (${j.ws.subscribed_count} token(s))`);
+                } else {
+                    console.warn('⚠️ Live WS subscribe:', j.message || 'no feed token yet — falling back to polling');
+                }
+            }).catch(() => {});
+        } catch (e) {}
+
+        const url = `/api/ticks/stream?exchange=${encodeURIComponent(this.activeExchange)}&token=${encodeURIComponent(this.activeToken)}&interval=${encodeURIComponent(this.activeTimeframe)}`;
+        try {
+            const es = new EventSource(url);
+            this.liveEventSource = es;
+            es.addEventListener('status', (ev) => {
+                try {
+                    const s = JSON.parse(ev.data);
+                    this.liveWsConnected = !!s.connected;
+                    this.setConnectionStatus(s.connected ? true : this.isLiveConnected, s.connected ? 'AngelOne+WS' : this.source);
+                } catch (e) {}
+            });
+            es.addEventListener('tick', (ev) => {
+                try {
+                    const t = JSON.parse(ev.data);
+                    this._onLiveTick(t);
+                } catch (e) {}
+            });
+            es.addEventListener('candle', (ev) => {
+                try {
+                    const c = JSON.parse(ev.data);
+                    this._onLiveCandle(c);
+                } catch (e) {}
+            });
+            es.onerror = () => {
+                // Browser auto-reconnects EventSource; don't spam logs.
+                this.liveWsConnected = false;
+            };
+        } catch (e) {
+            console.warn('SSE not supported, polling only:', e);
+        }
+    }
+
+    _onLiveTick(t) {
+        if (!t || !t.ltp) return;
+        this.lastLtp = t.ltp;
+        const prev = this.prevClose || t.prev_close || t.ltp;
+        this.updateHeaderPrice(t.ltp, t.ltp - prev);
+        const spot = document.getElementById('greekSpot');
+        if (spot) spot.value = t.ltp.toFixed(2);
+        // Show live indicator dot on LTP badge when WS is flowing
+        const lh = document.getElementById('liveHeart');
+        if (lh) lh.style.opacity = '1';
+        // Reset heartbeat dot after 1s
+        clearTimeout(this._hbT);
+        this._hbT = setTimeout(() => { if (lh) lh.style.opacity = '0.4'; }, 1200);
+    }
+
+    _onLiveCandle(c) {
+        if (!c) return;
+        // Push forming candle into the bridge (updates the last bar + volume in-place)
+        this.tvBridge.updateTick({
+            time: c.time, open: c.open, high: c.high, low: c.low,
+            close: c.close, volume: c.volume || 0,
+        });
+        // Keep currentData in sync for analytics
+        if (this.tvBridge.currentData && this.tvBridge.currentData.length) {
+            const data = this.tvBridge.currentData;
+            const last = data[data.length - 1];
+            if (last && last.time === c.time) {
+                last.open = c.open; last.high = c.high; last.low = c.low;
+                last.close = c.close; last.volume = c.volume || 0;
+            } else if (c.time > last.time) {
+                data.push({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0 });
+            }
+        }
+        // Throttled analytics re-run (max ~1/sec to avoid CPU burn)
+        if (!this._liveAnalT || Date.now() - this._liveAnalT > 1000) {
+            this._liveAnalT = Date.now();
+            this.applyIndicators();
+            this.runAllAnalytics(this.tvBridge.currentData);
+            const btn = document.getElementById('greekCalcBtn'); if (btn) btn.click();
+        }
     }
 
     // --------------- MENUS ---------------
@@ -317,8 +417,9 @@ class App {
     }
 
     setConnectionStatus(status, sourceLabel) {
+        const wsOn = this.liveWsConnected;
         this.isLiveConnected = !!status && this.marketOpen;
-        this.source = sourceLabel || (status ? 'AngelOne' : 'SimulatedPro');
+        this.source = sourceLabel || (status ? (wsOn ? 'AngelOne+WS' : 'AngelOne') : 'SimulatedPro');
         const badge = document.getElementById('connBadge');
         const txt = document.getElementById('connText');
         const foot = document.getElementById('engineFooter');
@@ -327,12 +428,13 @@ class App {
         const closed = !!status && !this.marketOpen;
         if (badge && txt) {
             badge.classList.remove('conn-live','conn-sim','conn-off');
-            if (live)   { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
-            else if (closed) { badge.classList.add('conn-off'); txt.textContent = 'MARKET CLOSED'; }
-            else        { badge.classList.add('conn-sim'); txt.textContent = 'SIMULATED'; }
+            if (live && wsOn) { badge.classList.add('conn-live'); txt.textContent = '⚡ LIVE TICKS'; }
+            else if (live)    { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
+            else if (closed)  { badge.classList.add('conn-off'); txt.textContent = 'MARKET CLOSED'; }
+            else              { badge.classList.add('conn-sim'); txt.textContent = 'SIMULATED'; }
         }
-        if (foot) foot.textContent = `v2026.10 Engine • ${live ? '🟢 Angel One Live' : closed ? '🔴 Market Closed' : '🟡 Simulated Feed'} • ${this.source}`;
-        if (dot) dot.className = live ? 'dot-green' : closed ? 'dot-red' : 'dot-yellow';
+        if (foot) foot.textContent = `v2026.10 Engine • ${wsOn && live ? '⚡ WebSocket LIVE' : live ? '🟢 Angel One REST' : closed ? '🔴 Market Closed' : '🟡 Simulated Feed'} • ${this.source}`;
+        if (dot) dot.className = (wsOn && live) ? 'dot-green' : live ? 'dot-yellow' : closed ? 'dot-red' : 'dot-yellow';
     }
 
     refreshStatusBadge() {
@@ -365,6 +467,9 @@ class App {
         const label = tf === 'D' ? 'D' : `${tf}m`;
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
+
+        // Resubscribe live WS to new token/timeframe
+        this.connectLiveStream();
 
         const meta = { token: this.activeToken, exchange: this.activeExchange };
         const cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
