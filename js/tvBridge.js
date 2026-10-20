@@ -80,7 +80,7 @@ class TVBridge {
                 borderColor: '#2b2b43',
                 borderVisible: true,
                 alignLabels: true,
-                minimumWidth: 60,      // uniform across ALL panes so vertical grid aligns
+                minimumWidth: 68,      // uniform across ALL panes so vertical grid aligns
                 scaleMargins: { top: 0.05, bottom: 0.05 },
             },
             leftPriceScale: { visible: false },
@@ -122,6 +122,9 @@ class TVBridge {
                 const el = this.paneEls[k];
                 c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
             });
+            // Force ALL right-side price-axis canvases to match the MAIN chart's axis width
+            // so vertical grid lines are pixel-perfect aligned across every pane.
+            this._alignPriceAxes();
         };
         if (window.ResizeObserver) {
             this._resizeObserver = new ResizeObserver(resize);
@@ -130,6 +133,47 @@ class TVBridge {
             window.addEventListener('resize', resize);
         }
         setTimeout(resize, 50);
+        setTimeout(resize, 250);
+    }
+
+    _alignPriceAxes() {
+        try {
+            // Find main chart's right axis cell width (LW renders chart as <table><tr><td>plot</td><td>axis</td></tr></table>)
+            const getAxisWidth = (chartEl) => {
+                if (!chartEl) return 0;
+                const tbl = chartEl.querySelector('table');
+                if (!tbl) return 0;
+                const cells = tbl.querySelectorAll('td');
+                // Last <td> holds the price axis
+                const axisCell = cells[cells.length - 1];
+                return axisCell ? axisCell.getBoundingClientRect().width : 0;
+            };
+            const mainEl = this.paneEls.main;
+            const targetW = getAxisWidth(mainEl);
+            if (!targetW) return;
+            ['vol', 'rsi', 'macd'].forEach(k => {
+                const el = this.paneEls[k];
+                if (!el) return;
+                const tbl = el.querySelector('table');
+                if (!tbl) return;
+                const cells = tbl.querySelectorAll('td');
+                const axisCell = cells[cells.length - 1];
+                const plotCell = cells[0];
+                if (axisCell) {
+                    axisCell.style.width = targetW + 'px';
+                    axisCell.style.minWidth = targetW + 'px';
+                    axisCell.style.maxWidth = targetW + 'px';
+                    // Also force the inner canvas wrappers
+                    axisCell.querySelectorAll('div, canvas').forEach(n => {
+                        n.style.width = targetW + 'px';
+                    });
+                }
+                // Recalculate plot cell width: total - axisW - border
+                if (plotCell) {
+                    plotCell.style.width = (el.clientWidth - targetW) + 'px';
+                }
+            });
+        } catch (e) { /* alignment best-effort */ }
     }
 
     // ---------- init ----------
@@ -162,7 +206,7 @@ class TVBridge {
             visible: true,
             textColor: 'transparent',   // hide numeric labels (200K etc.)
             drawTicks: false,            // hide tick marks
-            minimumWidth: 60,            // MUST equal other panes — key to vertical alignment
+            minimumWidth: 68,            // MUST equal other panes — key to vertical alignment
         });
 
         // 3) RSI pane — safe autoscale with dashed 30/70 & dotted 50 reference lines
@@ -173,7 +217,7 @@ class TVBridge {
         this.charts.rsi.priceScale('right').applyOptions({
             scaleMargins: { top: 0.08, bottom: 0.08 },
             autoScale: true,
-            minimumWidth: 60,
+            minimumWidth: 68,
         });
         try {
             this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
@@ -195,7 +239,7 @@ class TVBridge {
                 lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false, title: '0',
             });
         } catch (e) {}
-        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 60 });
+        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 68 });
 
         // Disable wheel/scroll/horiz drag on sub-charts so main chart drives it
         ['vol', 'rsi', 'macd'].forEach(k => {

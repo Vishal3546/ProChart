@@ -434,31 +434,32 @@ def ws_status():
 
 
 @app.get("/api/ticks/stream")
-async def ticks_stream(exchange: str = "NSE", token: str = "", interval: str = "15"):
+async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "", interval: str = "15"):
     """
     Server-Sent Events (SSE) stream that pushes:
       - 'tick' events: every LTP tick (throttled to ~5/sec per client)
-      - 'candle' events: whenever the forming candle changes (so the chart can update without polling)
+      - 'candle' events: whenever the forming candle changes
     Browser connects via EventSource('/api/ticks/stream?exchange=NSE&token=2885&interval=15').
     """
     from fastapi.responses import StreamingResponse as _SR
     exchange = (exchange or "NSE").strip().upper()
     token = str(token or "").strip()
-    et = ws_ex_type(exchange)
 
     async def event_gen():
         last_tick_ts = 0.0
         last_candle_key = None
-        # Send initial status immediately so browser knows stream is alive
         yield f"event: status\ndata: {json.dumps(live_ws.status())}\n\n"
-        # Kick off subscription if not yet done
         if token and feed_token:
             live_ws.subscribe(exchange, token)
-        # Poll loop (non-blocking via asyncio.sleep)
         while True:
-            await asyncio.sleep(0.2)  # 5 Hz throttle
-            # Tick updates
-            q = live_ws.quote(exchange, token)
+            # Detect client disconnect to avoid CancelledError spam on shutdown/F5
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(0.2)
+            try:
+                q = live_ws.quote(exchange, token)
+            except Exception:
+                q = None
             now_ts = time.time()
             if q and (now_ts - last_tick_ts) >= 0.25:
                 last_tick_ts = now_ts
@@ -466,12 +467,13 @@ async def ticks_stream(exchange: str = "NSE", token: str = "", interval: str = "
                     "ltp": q["ltp"], "day_open": q["day_open"],
                     "day_high": q["day_high"], "day_low": q["day_low"],
                     "volume": q["day_volume"], "oi": q.get("oi", 0),
-                    "prev_close": q["prev_close"],
-                    "ts": now_ts,
+                    "prev_close": q["prev_close"], "ts": now_ts,
                 }
                 yield f"event: tick\ndata: {json.dumps(payload)}\n\n"
-            # Forming candle updates (only when changed)
-            fc = live_ws.forming_candle(exchange, token, interval)
+            try:
+                fc = live_ws.forming_candle(exchange, token, interval)
+            except Exception:
+                fc = None
             if fc:
                 ck = f"{fc['time']}_{fc['close']}_{fc['volume']}"
                 if ck != last_candle_key:
