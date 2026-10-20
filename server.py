@@ -45,6 +45,9 @@ from scrip_loader import (
 # Live WebSocket client (SmartWebSocketV2, auto-reconnect, tick cache, forming candle builder)
 from live_ws import live_ws, ex_type as ws_ex_type
 
+# NSE holiday calendar (fetches official NSE list + fallback for Sat/Sun/holidays)
+from nse_calendar import nse_calendar
+
 # SmartApi SDK — try both capitalizations; graceful fallback if not installed.
 # smartapi-python 1.5.5 ships as "SmartApi" (case-sensitive) on all platforms.
 try:
@@ -235,9 +238,8 @@ def root():
 @app.get("/api/status")
 def status():
     now_ist = datetime.now(IST)
-    weekday = now_ist.weekday()
-    hhmm = now_ist.hour * 100 + now_ist.minute
-    market_open = (weekday < 5) and (915 <= hhmm < 1530)
+    cal = nse_calendar.market_status()
+    market_open = cal["market_open"]
     ws_stat = live_ws.status()
     return {
         "status": "online",
@@ -247,6 +249,11 @@ def status():
         "scrip_loaded": scrip_ready(),
         "server_time": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
         "market_open": market_open,
+        "market_reason": cal["reason"],
+        "is_holiday": cal["is_holiday"],
+        "pre_open": cal.get("pre_open", False),
+        "date": cal["date"],
+        "weekday": cal["weekday"],
     }
 
 
@@ -508,9 +515,8 @@ def get_candles(
 
     # Market hours helper (NSE): Mon-Fri 09:15-15:30 IST
     now_ist = datetime.now(IST)
-    weekday = now_ist.weekday()  # 0=Mon .. 6=Sun
-    hhmm = now_ist.hour * 100 + now_ist.minute
-    market_open = (weekday < 5) and (915 <= hhmm < 1530)
+    cal = nse_calendar.market_status()
+    market_open = cal["market_open"]
 
     # Serve cached data with TTL: longer TTL when market is closed or rate-limited
     if cache_key in candle_cache:

@@ -76,7 +76,13 @@ class TVBridge {
             },
             grid: { vertLines: { color: 'transparent' }, horzLines: { color: '#1f2933', style: 1 } },
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-            rightPriceScale: { borderColor: '#2b2b43', borderVisible: true, alignLabels: true, scaleMargins: { top: 0.05, bottom: 0.05 } },
+            rightPriceScale: {
+                borderColor: '#2b2b43',
+                borderVisible: true,
+                alignLabels: true,
+                minimumWidth: 58,      // reserves space for axis labels like "70.00" / "MACD -0.85"
+                scaleMargins: { top: 0.05, bottom: 0.05 },
+            },
             leftPriceScale: { visible: false },
             timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 6, barSpacing: 8, visible: false, minBarSpacing: 0.5 },
             handleScroll: { vertTouchDrag: false },
@@ -162,6 +168,7 @@ class TVBridge {
         this.charts.rsi.priceScale('right').applyOptions({
             scaleMargins: { top: 0.08, bottom: 0.08 },
             autoScale: true,
+            minimumWidth: 60,
         });
         try {
             this.series.rsi.createPriceLine({ price: 70, color: '#f23645', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70' });
@@ -183,7 +190,7 @@ class TVBridge {
                 lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false, title: '0',
             });
         } catch (e) {}
-        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
+        this.charts.macd.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 60 });
 
         // Disable wheel/scroll/horiz drag on sub-charts so main chart drives it
         ['vol', 'rsi', 'macd'].forEach(k => {
