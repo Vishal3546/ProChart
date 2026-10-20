@@ -1,0 +1,35 @@
+/* ProChart axis alignment
+   Force every LW chart's right-axis column to exactly 80px across ALL panes.
+   This is the only reliable way to get pixel-perfect vertical grid alignment
+   because LW internally calculates widths based on label content and varies
+   them per pane (e.g. 5-digit SENSEX vs 30/70 RSI vs -2.50 MACD). */
+#ch-main .tv-lightweight-charts table tr > td:last-child,
+#ch-vol  .tv-lightweight-charts table tr > td:last-child,
+#ch-rsi  .tv-lightweight-charts table tr > td:last-child,
+#ch-macd .tv-lightweight-charts table tr > td:last-child {
+    width: 80px !important;
+    min-width: 80px !important;
+    max-width: 80px !important;
+    box-sizing: border-box !important;
+}
+/* Volume pane: hide labels but keep the 80px column so alignment is preserved */
+#ch-vol .tv-lightweight-charts table tr > td:last-child .tv-lightweight-charts-price-axis-label,
+#ch-vol .tv-lightweight-charts table tr > td:last-child canvas:first-of-type {
+    color: transparent !important;
+    text-shadow: none !important;
+}
+/* Custom value badges for RSI/MACD (shown in axis column when lastValueVisible is off) */
+.ch-axis-badge {
+    position: absolute;
+    right: 2px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    pointer-events: none;
+    z-index: 5;
+    white-space: nowrap;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+}

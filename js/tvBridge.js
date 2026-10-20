@@ -59,6 +59,7 @@ class TVBridge {
         ];
         PANES.forEach(p => {
             const el = document.createElement('div');
+            el.id = 'ch-' + p.key;
             el.style.cssText = `position:relative;flex:${p.flex};min-height:0;width:100%;border-bottom:1px solid #1f2933;`;
             el.dataset.pane = p.key;
             wrap.appendChild(el);
@@ -122,7 +123,6 @@ class TVBridge {
                 const el = this.paneEls[k];
                 c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
             });
-            this._syncAxisWidths();
         };
         if (window.ResizeObserver) {
             this._resizeObserver = new ResizeObserver(sync);
@@ -130,26 +130,36 @@ class TVBridge {
         } else {
             window.addEventListener('resize', sync);
         }
-        // Run once layout settles; sub-panes match main's measured axis width.
         setTimeout(sync, 60);
-        setTimeout(sync, 250);
+        setTimeout(sync, 300);
     }
 
-    _syncAxisWidths() {
-        // Native LW approach: read main's computed right-axis pixel width, then
-        // set the SAME width on sub-panes via minimumWidth. No DOM canvas hacks.
-        try {
-            const mainPS = this.charts.main && this.charts.main.priceScale('right');
-            if (!mainPS) return;
-            const width = mainPS.width();
-            if (!width || width < 40) return;
-            ['vol', 'rsi', 'macd'].forEach(k => {
-                try {
-                    const ps = this.charts[k].priceScale(k === 'vol' ? 'right' : 'right');
-                    ps.applyOptions({ minimumWidth: width + 2, mode: ps.options().mode });
-                } catch (_) {}
-            });
-        } catch (_) {}
+    // Axis alignment is handled by CSS (css/alignment.css) — every pane's right
+    // axis column is forced to 80px via !important, giving pixel-perfect
+    // vertical grid alignment regardless of label content or symbol.
+    _syncAxisWidths() {}
+
+    _updateAxisBadge(pane, value, color) {
+        if (!this.paneEls[pane]) return;
+        let badge = this.paneEls[pane].querySelector('.ch-axis-badge');
+        if (value == null || !isFinite(value)) { if (badge) badge.remove(); return; }
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.className = 'ch-axis-badge';
+            this.paneEls[pane].appendChild(badge);
+        }
+        badge.style.background = color;
+        badge.textContent = value.toFixed(2);
+        // RSI: position vertically proportional to 0-100; MACD: pinned near zero
+        const h = this.paneEls[pane].clientHeight || 80;
+        if (pane === 'rsi') {
+            const top = h * 0.08 + (h * 0.84) * (1 - value / 100);
+            badge.style.top = Math.max(4, Math.min(h - 20, top - 9)) + 'px';
+            badge.style.bottom = 'auto';
+        } else {
+            badge.style.bottom = '28px';
+            badge.style.top = 'auto';
+        }
     }
 
     // ---------- init ----------
@@ -189,6 +199,7 @@ class TVBridge {
         this.charts.rsi = this._makeChart('rsi');
         this.series.rsi = this.charts.rsi.addSeries(LightweightCharts.LineSeries, {
             color: '#9c27b0', lineWidth: 2, priceScaleId: 'right',
+            lastValueVisible: false, priceLineVisible: false,
         });
         this.charts.rsi.priceScale('right').applyOptions({
             scaleMargins: { top: 0.08, bottom: 0.08 },
@@ -205,9 +216,9 @@ class TVBridge {
         this.charts.macd = this._makeChart('macd', {
             timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#2b2b43', rightOffset: 6, visible: true, barSpacing: 8, minBarSpacing: 0.5 },
         });
-        this.series.macdHist = this.charts.macd.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false });
-        this.series.macdFast = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'MACD' });
-        this.series.macdSlow = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#FF6D00', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'Signal' });
+        this.series.macdHist = this.charts.macd.addSeries(LightweightCharts.HistogramSeries, { priceLineVisible: false, lastValueVisible: false });
+        this.series.macdFast = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#2962FF', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: 'MACD' });
+        this.series.macdSlow = this.charts.macd.addSeries(LightweightCharts.LineSeries, { color: '#FF6D00', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, title: 'Signal' });
         // Zero line on MACD (reference for bullish/bearish crossover)
         try {
             this.series.macdFast.createPriceLine({
@@ -349,6 +360,8 @@ class TVBridge {
         this.series.macdHist.setData(histMap);
         this.series.macdFast.setData(fastMap);
         this.series.macdSlow.setData(slowMap);
+        const lastMacd = fastMap.length ? fastMap[fastMap.length - 1].value : null;
+        this._updateAxisBadge('macd', lastMacd, '#2962FF');
     }
     removeMACD() {
         // Hide data (keep series alive on its chart to avoid flicker)
@@ -362,14 +375,15 @@ class TVBridge {
         if (!this.series.rsi) return;
         try {
             const rsiData = TechnicalIndicators.RSI(this.currentData, period);
-            this.series.rsi.setData(this._mapArr(rsiData).filter(d => d.value != null && isFinite(d.value)));
-            // Set RSI to 0-100 fixed price range via autoscaleInfoProvider (LW v5 safe)
+            const mapped = this._mapArr(rsiData).filter(d => d.value != null && isFinite(d.value));
+            this.series.rsi.setData(mapped);
             this.series.rsi.applyOptions({
                 autoscaleInfoProvider: () => ({
                     priceRange: { minValue: 0, maxValue: 100 },
                     margins: { above: 4, below: 4 },
                 }),
             });
+            this._updateAxisBadge('rsi', mapped.length ? mapped[mapped.length - 1].value : null, '#9c27b0');
         } catch (e) { console.warn('RSI setData failed', e); }
     }
 

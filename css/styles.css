@@ -67,9 +67,7 @@ body.dark-theme {
 .conn-off  { color: var(--down); border-color: rgba(242,54,69,0.35); background: rgba(242,54,69,0.08); }
 .conn-off  .conn-dot { background: var(--down); }
 
-@keyframes pulse {
-    0%,100% { opacity: 1; } 50% { opacity: 0.4; }
-}
+/* (pulse animation removed — static dots only) */
 
 /* ===== DROPDOWNS / SEARCH ===== */
 .dropdown-wrapper { position: relative; display: flex; align-items: center; }
