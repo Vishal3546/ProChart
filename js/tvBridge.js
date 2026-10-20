@@ -117,28 +117,39 @@ class TVBridge {
     }
 
     _syncResize() {
-        const resize = () => {
+        const sync = () => {
             Object.entries(this.charts).forEach(([k, c]) => {
                 const el = this.paneEls[k];
                 c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
             });
+            this._syncAxisWidths();
         };
         if (window.ResizeObserver) {
-            this._resizeObserver = new ResizeObserver(resize);
+            this._resizeObserver = new ResizeObserver(sync);
             Object.values(this.paneEls).forEach(el => this._resizeObserver.observe(el));
         } else {
-            window.addEventListener('resize', resize);
+            window.addEventListener('resize', sync);
         }
-        // Let LW render, then do ONE alignment pass after layout settles.
-        // No interval polling, no forced canvas widths — just set minimumWidth
-        // on every price scale to the widest label content (LW will honour it).
-        setTimeout(resize, 60);
+        // Run once layout settles; sub-panes match main's measured axis width.
+        setTimeout(sync, 60);
+        setTimeout(sync, 250);
     }
 
-    _alignPriceAxes() {
-        // NO-OP: rely on minimumWidth: 72 set uniformly on all scales so LW
-        // allocates the same axis width to every pane. Manual DOM overrides
-        // cause duplicate labels and canvas blurs (v5 recalculates on its own).
+    _syncAxisWidths() {
+        // Native LW approach: read main's computed right-axis pixel width, then
+        // set the SAME width on sub-panes via minimumWidth. No DOM canvas hacks.
+        try {
+            const mainPS = this.charts.main && this.charts.main.priceScale('right');
+            if (!mainPS) return;
+            const width = mainPS.width();
+            if (!width || width < 40) return;
+            ['vol', 'rsi', 'macd'].forEach(k => {
+                try {
+                    const ps = this.charts[k].priceScale(k === 'vol' ? 'right' : 'right');
+                    ps.applyOptions({ minimumWidth: width + 2, mode: ps.options().mode });
+                } catch (_) {}
+            });
+        } catch (_) {}
     }
 
     // ---------- init ----------
@@ -240,6 +251,7 @@ class TVBridge {
                 try { this.charts[k].timeScale().setVisibleLogicalRange(range); } catch (_) {}
                 try { this.charts[k].timeScale().scrollToRealTime(); } catch (_) {}
             });
+            this._syncAxisWidths();
         };
         apply();
         setTimeout(apply, 50);
