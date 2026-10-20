@@ -221,12 +221,13 @@ def refresh_master(force=False):
 
 def load_cached():
     """Load index from local cache on startup if present & today-ish."""
-    global _search_index
+    global _search_index, _last_refresh_ts
     for path in (INDEX_FILE, SCRIP_FILE):
         try:
             if not os.path.exists(path):
                 continue
-            age_days = (time.time() - os.path.getmtime(path)) / 86400
+            mtime = os.path.getmtime(path)
+            age_days = (time.time() - mtime) / 86400
             _log(f"Found cached {os.path.basename(path)} ({age_days:.1f} days old)")
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -236,6 +237,7 @@ def load_cached():
                 idx = _build_index(data)
             if idx and len(idx) > 1000:
                 _search_index = idx
+                _last_refresh_ts = mtime  # respect file's age for cache-fresh logic
                 _load_complete.set()
                 _log(f"⚡ Loaded {len(idx)} instruments from local cache (instant)")
                 return True
@@ -326,12 +328,12 @@ def start_background_tasks():
         _log("No valid cache found — downloading fresh master (may take a minute)...")
 
     def _initial():
-        # If cache was old or missing, force a fresh fetch
+        # Cache is valid for 24 hours (Angel publishes new list only daily ~8 AM)
         age = (time.time() - _last_refresh_ts) if _last_refresh_ts else 999999
-        if age > 12 * 3600:
+        if age > 24 * 3600:
             refresh_master(force=not loaded)
         else:
-            _log("Cache is fresh (<12h), skipping startup download")
+            _log(f"Cache is fresh ({age/3600:.1f}h old < 24h), skipping startup download")
 
     threading.Thread(target=_initial, daemon=True).start()
     threading.Thread(target=_daily_refresh_loop, daemon=True).start()

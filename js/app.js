@@ -122,17 +122,19 @@ class App {
 
     _onLiveTick(t) {
         if (!t || !t.ltp) return;
+        const prevPrice = this.lastLtp || t.ltp;
         this.lastLtp = t.ltp;
         const prev = this.prevClose || t.prev_close || t.ltp;
         this.updateHeaderPrice(t.ltp, t.ltp - prev);
         const spot = document.getElementById('greekSpot');
         if (spot) spot.value = t.ltp.toFixed(2);
-        // Show live indicator dot on LTP badge when WS is flowing
-        const lh = document.getElementById('liveHeart');
-        if (lh) lh.style.opacity = '1';
-        // Reset heartbeat dot after 1s
-        clearTimeout(this._hbT);
-        this._hbT = setTimeout(() => { if (lh) lh.style.opacity = '0.4'; }, 1200);
+        // Blink green dot ONLY when market is actually live & we got a fresh tick
+        if (this.marketOpen && !this.isHoliday) {
+            const lh = document.getElementById('connDot');
+            if (lh) { lh.style.transform = 'scale(1.3)'; }
+            clearTimeout(this._hbT);
+            this._hbT = setTimeout(() => { if (lh) lh.style.transform = 'scale(1)'; }, 250);
+        }
     }
 
     _onLiveCandle(c) {
@@ -418,23 +420,31 @@ class App {
 
     setConnectionStatus(status, sourceLabel) {
         const wsOn = this.liveWsConnected;
-        this.isLiveConnected = !!status && this.marketOpen;
+        const calReason = (this.calendarReason || '').toUpperCase();
+        const holidayMode = this.isHoliday || calReason.includes('HOLIDAY') || calReason.includes('WEEKEND') || calReason.includes('CLOSED');
+        this.isLiveConnected = !!status && this.marketOpen && !holidayMode;
         this.source = sourceLabel || (status ? (wsOn ? 'AngelOne+WS' : 'AngelOne') : 'SimulatedPro');
         const badge = document.getElementById('connBadge');
         const txt = document.getElementById('connText');
         const foot = document.getElementById('engineFooter');
         const dot = document.getElementById('connDot');
-        const live = !!status && this.marketOpen;
-        const closed = !!status && !this.marketOpen;
+        const live = !!status && this.marketOpen && !holidayMode;
+        const closed = (!!status && !this.marketOpen) || holidayMode;
         if (badge && txt) {
             badge.classList.remove('conn-live','conn-sim','conn-off');
             if (live && wsOn) { badge.classList.add('conn-live'); txt.textContent = '⚡ LIVE TICKS'; }
             else if (live)    { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
-            else if (closed)  { badge.classList.add('conn-off'); txt.textContent = 'MARKET CLOSED'; }
-            else              { badge.classList.add('conn-sim'); txt.textContent = 'SIMULATED'; }
+            else if (closed)  { badge.classList.add('conn-off');  txt.textContent = 'MARKET CLOSED'; }
+            else              { badge.classList.add('conn-sim');  txt.textContent = 'SIMULATED'; }
         }
-        if (foot) foot.textContent = `v2026.10 Engine • ${wsOn && live ? '⚡ WebSocket LIVE' : live ? '🟢 Angel One REST' : closed ? '🔴 Market Closed' : '🟡 Simulated Feed'} • ${this.source}`;
-        if (dot) dot.className = (wsOn && live) ? 'dot-green' : live ? 'dot-yellow' : closed ? 'dot-red' : 'dot-yellow';
+        if (foot) {
+            const label = (wsOn && live) ? '⚡ WebSocket LIVE'
+                       : live           ? '🟢 Angel One REST'
+                       : closed         ? '🔴 Market Closed'
+                       :                  '🟡 Simulated Feed';
+            foot.textContent = `v2026.10 Engine • ${label} • ${this.source}`;
+        }
+        if (dot) dot.className = (wsOn && live) ? 'dot-green' : closed ? 'dot-red' : 'dot-yellow';
     }
 
     refreshStatusBadge() {
@@ -445,16 +455,20 @@ class App {
     async checkServerStatus() {
         const s = await this.dataFeed.fetchStatus();
         if (s && s.status === 'online') {
-            const prev = this.marketOpen;
             this.marketOpen = s.market_open !== false;
-            if (this.marketOpen !== prev) this.refreshStatusBadge();
+            this.isHoliday = !!s.is_holiday;
+            this.calendarReason = s.market_reason || '';
             this.setConnectionStatus(!!s.angel_connected, s.angel_connected ? 'AngelOne' : 'SimulatedPro');
             if (!s.angel_connected) {
                 this.toast('Angel One not connected — showing simulated data. Add .env credentials for live feed.', 'warn');
+            } else if (this.isHoliday) {
+                this.toast(`Market closed: ${this.calendarReason} — live ticks unavailable today`, 'info');
             } else {
                 this.toast('Connected to Angel One SmartAPI ✅', 'success');
             }
         } else {
+            this.marketOpen = false;
+            this.isHoliday = false;
             this.setConnectionStatus(false, 'SimulatedPro');
             this.toast('Backend not reachable. Run: python server.py  — showing simulated data.', 'error');
         }

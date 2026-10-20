@@ -122,8 +122,6 @@ class TVBridge {
                 const el = this.paneEls[k];
                 c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
             });
-            // Force ALL right-side price-axis canvases to match the MAIN chart's axis width
-            // so vertical grid lines are pixel-perfect aligned across every pane.
             this._alignPriceAxes();
         };
         if (window.ResizeObserver) {
@@ -132,24 +130,33 @@ class TVBridge {
         } else {
             window.addEventListener('resize', resize);
         }
+        // Re-run alignment multiple times because LW adjusts axis width AFTER rendering
+        // (digits change, e.g. 1160.00 → 73852.90 → axis grows 78px; sub-panes must follow).
         setTimeout(resize, 50);
         setTimeout(resize, 250);
+        setTimeout(resize, 600);
+        setTimeout(resize, 1200);
+        // Poll every second for 5s after init (covers data load + indicator label rendering)
+        let ticks = 0;
+        this._alignInterval = setInterval(() => {
+            this._alignPriceAxes();
+            ticks++;
+            if (ticks >= 8) clearInterval(this._alignInterval);
+        }, 500);
     }
 
     _alignPriceAxes() {
         try {
-            // Find main chart's right axis cell width (LW renders chart as <table><tr><td>plot</td><td>axis</td></tr></table>)
             const getAxisWidth = (chartEl) => {
                 if (!chartEl) return 0;
                 const tbl = chartEl.querySelector('table');
                 if (!tbl) return 0;
                 const cells = tbl.querySelectorAll('td');
-                // Last <td> holds the price axis
                 const axisCell = cells[cells.length - 1];
                 return axisCell ? axisCell.getBoundingClientRect().width : 0;
             };
             const mainEl = this.paneEls.main;
-            const targetW = getAxisWidth(mainEl);
+            const targetW = Math.round(getAxisWidth(mainEl));
             if (!targetW) return;
             ['vol', 'rsi', 'macd'].forEach(k => {
                 const el = this.paneEls[k];
@@ -163,16 +170,24 @@ class TVBridge {
                     axisCell.style.width = targetW + 'px';
                     axisCell.style.minWidth = targetW + 'px';
                     axisCell.style.maxWidth = targetW + 'px';
-                    // Also force the inner canvas wrappers
+                    axisCell.style.boxSizing = 'border-box';
                     axisCell.querySelectorAll('div, canvas').forEach(n => {
                         n.style.width = targetW + 'px';
+                        if (n.tagName === 'CANVAS') {
+                            // Only touch canvas if its DOM width differs; avoid flickering redraws
+                            const cur = n.getBoundingClientRect().width;
+                            if (Math.abs(cur - targetW) > 1) {
+                                n.style.width = targetW + 'px';
+                            }
+                        }
                     });
                 }
-                // Recalculate plot cell width: total - axisW - border
                 if (plotCell) {
                     plotCell.style.width = (el.clientWidth - targetW) + 'px';
                 }
             });
+            // Cache so polling can detect changes
+            this._lastAxisW = targetW;
         } catch (e) { /* alignment best-effort */ }
     }
 
