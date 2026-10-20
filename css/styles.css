@@ -225,10 +225,9 @@ body.dark-theme {
 .dropdown-item .sym-exch { font-size: 9px; color: var(--fg-3); background: var(--bg-3); padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono', monospace; }
 
 /* ===== FLASH ANIMATIONS ===== */
-@keyframes flashGreen { 0% { background: rgba(8,153,129,0.5); color: #fff; } 100% { background: transparent; color: var(--up); } }
-@keyframes flashRed   { 0% { background: rgba(242,54,69,0.5); color: #fff; } 100% { background: transparent; color: var(--down); } }
-.flash-up   { animation: flashGreen 0.55s ease-out; color: var(--up); }
-.flash-down { animation: flashRed   0.55s ease-out; color: var(--down); }
+/* Price change styling: just static color (no flash animation to avoid pulse feel) */
+.flash-up   { color: var(--up); }
+.flash-down { color: var(--down); }
 
 /* ===== TOASTS ===== */
 .toast-container {
