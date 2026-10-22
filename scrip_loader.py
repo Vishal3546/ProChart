@@ -26,6 +26,9 @@ BLOCKED_SYMBOLS = {"TATAMTRDVR", "TATAMTRDVR-EQ"}
 REFRESH_HOUR_IST = 8
 REFRESH_MIN_IST = 45
 MAX_RETRIES = 3
+# Bump this version to force a re-index rebuild on next server start
+# (alias list updated, sorting rules changed — old cache incompatible).
+INDEX_VERSION = 2026_10_22_1
 
 # Search index populated at startup: list of dicts {symbol, name, token, exchange, type, symKey, nameKey}
 _search_index = []
@@ -199,9 +202,9 @@ def refresh_master(force=False):
             _log(f"Index built: {len(idx)} instruments (EQ+INDEX+OPT+FUT)")
             # Write temp files first, then rename (atomic on same FS)
             with open(tmp_raw, "w", encoding="utf-8") as f:
-                json.dump(raw, f, separators=(",", ":"))
+                json.dump({"v": INDEX_VERSION, "data": raw}, f, separators=(",", ":"))
             with open(tmp_idx, "w", encoding="utf-8") as f:
-                json.dump(idx, f, separators=(",", ":"))
+                json.dump({"v": INDEX_VERSION, "data": idx}, f, separators=(",", ":"))
             _atomic_replace(tmp_raw, SCRIP_FILE)
             _atomic_replace(tmp_idx, INDEX_FILE)
 
@@ -220,7 +223,7 @@ def refresh_master(force=False):
 
 
 def load_cached():
-    """Load index from local cache on startup if present & today-ish."""
+    """Load index from local cache on startup if present & version matches."""
     global _search_index, _last_refresh_ts
     for path in (INDEX_FILE, SCRIP_FILE):
         try:
@@ -231,13 +234,23 @@ def load_cached():
             _log(f"Found cached {os.path.basename(path)} ({age_days:.1f} days old)")
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            # Support both old (raw list) and new ({v:..,data:[...]}) formats
+            if isinstance(data, dict) and "data" in data:
+                if data.get("v") != INDEX_VERSION:
+                    _log(f"Cache version mismatch (got {data.get('v')}, want {INDEX_VERSION}) — will rebuild")
+                    continue
+                data = data["data"]
+            elif isinstance(data, list):
+                # Old unversioned cache — force rebuild (our alias/sort logic updated)
+                _log("Old unversioned cache detected — will rebuild with new search rules")
+                continue
             if path == INDEX_FILE:
                 idx = data
             else:
                 idx = _build_index(data)
             if idx and len(idx) > 1000:
                 _search_index = idx
-                _last_refresh_ts = mtime  # respect file's age for cache-fresh logic
+                _last_refresh_ts = mtime
                 _load_complete.set()
                 _log(f"⚡ Loaded {len(idx)} instruments from local cache (instant)")
                 return True
@@ -246,50 +259,166 @@ def load_cached():
     return False
 
 
+# Common alias map for popular stocks where Angel's official "name" field is
+# just the ticker (no English name). "indian hotels" -> INDHOTEL, "state bank" -> SBIN, etc.
+_ALIASES = {
+    "indian hotel": "INDHOTEL", "indian hotels": "INDHOTEL", "ind hotels": "INDHOTEL",
+    "taj hotel": "INDHOTEL", "taj hotels": "INDHOTEL", "ihcl": "INDHOTEL",
+    "inhotel": "INDHOTEL", "inhotels": "INDHOTEL", "indhotels": "INDHOTEL", "indhotel": "INDHOTEL",
+    "indianhotels": "INDHOTEL", "indianhotel": "INDHOTEL",
+    "tata motors": "TATAMOTORS", "tata motor": "TATAMOTORS", "tatamotors": "TATAMOTORS",
+    "tatamotor": "TATAMOTORS", "tata mot": "TATAMOTORS",
+    "state bank": "SBIN", "sbi": "SBIN", "state bank of india": "SBIN",
+    "hdfc bank": "HDFCBANK", "hdfc": "HDFCBANK",
+    "icici bank": "ICICIBANK", "icici": "ICICIBANK",
+    "kotak bank": "KOTAKBANK", "kotak": "KOTAKBANK",
+    "axis bank": "AXISBANK", "axis": "AXISBANK",
+    "reliance industries": "RELIANCE", "ril": "RELIANCE",
+    "tata consultancy": "TCS", "tcs consultancy": "TCS", "tata consult": "TCS",
+    "infosys": "INFY", "info sys": "INFY",
+    "larsen": "LT", "larsen toubro": "LT", "l&t": "LT", "ln t": "LT",
+    "housing development finance": "HDFC",
+    "itc": "ITC", "i t c": "ITC",
+    "maruti": "MARUTI", "maruti suzuki": "MARUTI",
+    "mahindra": "M&M", "m m": "M&M", "mahindra mahindra": "M&M", "m&m": "M&M",
+    "bajaj finance": "BAJFINANCE", "bajaj fin": "BAJFINANCE",
+    "bajaj finserv": "BAJAJFINSV",
+    "asian paints": "ASIANPAINT", "asian paint": "ASIANPAINT",
+    "hindustan unilever": "HINDUNILVR", "hul": "HINDUNILVR", "hind lever": "HINDUNILVR",
+    "nestle": "NESTLEIND", "nestle india": "NESTLEIND",
+    "britannia": "BRITANNIA",
+    "havells": "HAVELLS", "havels": "HAVELLS", "havels india": "HAVELLS",
+    "coal india": "COALINDIA",
+    "ntpc": "NTPC",
+    "power grid": "POWERGRID",
+    "bharat petroleum": "BPCL", "bpcl": "BPCL",
+    "hindustan petroleum": "HINDPETRO", "hpcl": "HINDPETRO",
+    "indian oil": "IOC", "indian oil corp": "IOC", "ioc": "IOC",
+    "oil natural gas": "ONGC", "ongc": "ONGC",
+    "tata steel": "TATASTEEL", "tata steel ltd": "TATASTEEL",
+    "jsw steel": "JSWSTEEL",
+    "titan": "TITAN", "tata titan": "TITAN",
+    "life insurance": "LICI", "lic": "LICI", "lic india": "LICI",
+    "sun pharma": "SUNPHARMA", "sun pharmaceutical": "SUNPHARMA",
+    "d r reddy": "DRREDDY", "dr reddys": "DRREDDY", "dr reddy": "DRREDDY",
+    "cipla": "CIPLA",
+    "aurobindo": "AUROPHARMA",
+    "adani enterprises": "ADANIENT", "adani ent": "ADANIENT",
+    "adani ports": "ADANIPORTS",
+    "wipro": "WIPRO",
+    "tech mahindra": "TECHM", "techm": "TECHM",
+    "hcl tech": "HCLTECH", "hcl technologies": "HCLTECH",
+    "sbi life": "SBILIFE",
+    "ultratech": "ULTRACEMCO", "ultra tech": "ULTRACEMCO",
+    "gail": "GAIL", "gail india": "GAIL",
+    "tata power": "TATAPOWER",
+    "hero motocorp": "HEROMOTOCO", "hero moto": "HEROMOTOCO",
+    "bajaj auto": "BAJAJ-AUTO",
+    "eicher motors": "EICHERMOT", "eicher": "EICHERMOT",
+    # Major indices (user expects the INDEX record, not some ETF named NIFTYBEES etc.)
+    # Use (exchange, symKey) — symKey is lowercased Angel "symbol" field.
+    "nifty": ("NSE", "nifty 50"), "nifty 50": ("NSE", "nifty 50"), "nifty50": ("NSE", "nifty 50"),
+    "bank nifty": ("NSE", "nifty bank"), "banknifty": ("NSE", "nifty bank"),
+    "finnifty": ("NSE", "nifty fin service"), "fin nifty": ("NSE", "nifty fin service"),
+    "sensex": ("BSE", "sensex"),
+    "india vix": ("NSE", "india vix"), "vix": ("NSE", "india vix"),
+}
+
+# Alias targets can be either a symKey string (for EQ matches) or a (exchange, name) tuple
+# for INDEX matches (since indices have neither -EQ suffix nor a clean ticker symbol).
+
+
 def search(q, limit=20):
     """TradingView-style relevance search; returns top N matches."""
     if not _search_index:
         return None  # signals "not loaded yet"
-    query = (q or "").strip().lower()[:40]
-    if len(query) < 1:
+    raw_query = (q or "").strip().lower()[:40]
+    if len(raw_query) < 1:
         return []
+    # Smart query normalization: strip suffix words (" co ltd", " limited", " ltd") and trailing plural 's'
+    query = raw_query
+    # Normalize by removing common company-name suffixes ANYWHERE (not just suffix — user might type in middle)
+    for noise in (" co. ltd.", " co ltd", " co. ltd", " co ltd.", " limited", " ltd.", " ltd", " co.", " co"):
+        query = query.replace(noise, "")
+    query = " ".join(query.split())  # collapse whitespace after removals
+    if query.endswith("s") and len(query) > 3:
+        query = query[:-1]
+    # Collapse whitespace
+    q_collapsed = " ".join(query.split())
+    raw_collapsed = " ".join(raw_query.split())
+
+    def _word_prefix_match(haystack, q):
+        """Any word in haystack starts with q (and q is >=3 chars)."""
+        if len(q) < 3: return False
+        for w in haystack.replace("-", " ").replace("_", " ").split():
+            if w.startswith(q): return True
+        return False
+
     if len(query) < 2:
         # 1 char: prefix-only on symbolKey
         matches = []
         for s in _search_index:
             if s["symKey"].startswith(query):
-                # Heavily prioritize EQ/INDEX over OPT_FUT for quick typing
                 typeBoost = 0 if s["type"] in ("EQ", "INDEX") else 50
                 matches.append((typeBoost + 1, s))
                 if len(matches) >= limit: break
     else:
+        # Build alias-matched symKey/name to float to the very top
+        alias_target = _ALIASES.get(q_collapsed) or _ALIASES.get(raw_collapsed)
         matches = []
         for s in _search_index:
             sk = s["symKey"]; nk = s["nameKey"]
             rank = 99
-            # 1) Exact match
-            if sk == query or (s["type"] == "EQ" and sk == query + "-eq"):
-                rank = 0
-            elif sk.startswith(query):         rank = 1
-            elif nk.startswith(query):         rank = 2
-            elif query in sk:                  rank = 3
-            elif query in nk:                  rank = 4
-            else:
-                # Fuzzy: all tokens appear? (e.g. "tata con" -> TATA CONSULTANCY)
-                toks = query.split()
-                if len(toks) > 1 and all(t in sk or t in nk for t in toks):
-                    rank = 5
-            # Heavily prioritize EQ/INDEX ahead of OPT_FUT so TCS/TATASTEEL etc
-            # appear before option strikes. OPT_FUT rank is bumped into a later tier
-            # (rank + 20) so all EQ/INDEX results come first.
+            # 0) Alias match (explicit override — e.g. "indian hotels" → INDHOTEL, "nifty" → Nifty 50 INDEX)
+            if alias_target is not None:
+                if isinstance(alias_target, tuple) and len(alias_target) == 2:
+                    tgt_exch, tgt_sym = alias_target
+                    if s.get("type") == "INDEX" and s.get("exchange") == tgt_exch and sk == tgt_sym:
+                        rank = -1
+                elif isinstance(alias_target, str) and sk == alias_target.lower() and s["type"] == "EQ":
+                    rank = -1
+            if rank == 99:
+                if sk == query or sk == raw_query:
+                    rank = 0
+                elif sk.startswith(query) or sk.startswith(raw_query):
+                    rank = 1
+                elif nk.startswith(query) or nk.startswith(raw_query):
+                    rank = 2
+                elif query in sk or raw_query in sk:
+                    rank = 3
+                elif query in nk or raw_query in nk:
+                    rank = 4
+                else:  # fuzzy tiers only for non-matches
+                    # Multi-token match: all tokens appear in sym or name (e.g. "indian hot" -> INDIAN HOTELS)
+                    toks = [t for t in query.split() if len(t) >= 2]
+                    raw_toks = [t for t in raw_query.split() if len(t) >= 2]
+                    all_toks = toks + [t for t in raw_toks if t not in toks]
+                    if all_toks and all((t in sk or t in nk or _word_prefix_match(nk, t)) for t in all_toks):
+                        rank = 5
+                    # Word-prefix match for single-word query (e.g. "hotel" -> EIHOTEL, INDHOTEL)
+                    elif len(query) >= 3 and _word_prefix_match(nk, query):
+                        rank = 6
+                    # Containment of raw/normalized query in symKey
+                    else:
+                        if len(query) >= 4 and query in sk:
+                            rank = 7
+                        elif len(raw_query) >= 4 and raw_query in sk:
+                            rank = 7
+            # OPT_FUT rank is bumped so EQ/INDEX appear first (no options cluttering equity search)
             if s["type"] == "OPT_FUT":
                 rank += 20
-            # Blue-chip (short symbol) tiny boost to float RELIANCE/TCS up
-            if s["type"] in ("EQ", "INDEX") and len(sk) <= 10:
-                rank -= 0.1
+            # Tight matches (smaller distance between query and actual symbol) float up:
+            # shorter symKey AND larger prefix overlap = better match.
+            if s["type"] in ("EQ", "INDEX"):
+                # bonus when symKey starts with (raw or normalized) query: float to top
+                if sk.startswith(query) or sk.startswith(raw_query):
+                    rank -= 0.5
+                # tiny penalty for very short symbols (IT, LT, NH) matching random substrings
+                if len(sk) < 4:
+                    rank += 2
             if rank < 99:
                 matches.append((rank, s))
-    matches.sort(key=lambda x: (x[0], 0 if x[1]["type"] == "EQ" else 1 if x[1]["type"] == "INDEX" else 2, x[1]["symKey"]))
+    matches.sort(key=lambda x: (x[0], 0 if x[1]["type"] == "EQ" else 1 if x[1]["type"] == "INDEX" else 2, len(x[1]["symKey"]), x[1]["symKey"]))
     out = []
     for _, s in matches[:limit]:
         out.append({
