@@ -91,6 +91,21 @@
             </div>
 
             <aside class="analytics-sidebar">
+                <div class="panel-card" id="biasPanel">
+                    <h3><i class="fa-solid fa-compass text-info"></i> TREND BIAS</h3>
+                    <div id="trendBiasResult" class="bias-badge text-muted">—</div>
+                    <div id="trendBiasBreakdown" class="bias-breakdown"></div>
+                </div>
+                <div class="panel-card" id="boPanel">
+                    <h3><i class="fa-solid fa-rocket" style="color:#ffae00"></i> BREAKOUT SCANNER</h3>
+                    <div id="breakoutResult" class="plan-empty">Scanning for coil / breakout...</div>
+                </div>
+
+                <div class="panel-card" id="planPanel">
+                    <h3><i class="fa-solid fa-bullseye text-success"></i> TRADE PLAN</h3>
+                    <div id="tradePlanResult" class="plan-empty">No strong bias yet</div>
+                </div>
+
                 <div class="panel-card">
                     <h3><i class="fa-solid fa-crown text-warning"></i> Master Pro Dashboard</h3>
                     <div class="metric-row"><span>BOLLINGER SQUEEZE</span><div id="signalSqueeze" class="metric-val text-muted">—</div></div>
@@ -171,6 +186,9 @@
     <script src="js/closingTrapEngine.js"></script>
     <script src="js/bigCandleDetector.js"></script>
     <script src="js/nextCandlePredictor.js"></script>
+    <script src="js/trendBiasEngine.js"></script>
+    <script src="js/tradingPlanEngine.js"></script>
+    <script src="js/breakoutScanner.js"></script>
     <script src="js/orderFlowAbsorptionEngine.js"></script>
     <script src="js/preMarketEngine.js"></script>
 

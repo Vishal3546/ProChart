@@ -252,3 +252,50 @@ body.dark-theme {
 @keyframes toastIn  { to { opacity: 1; transform: translateX(0); } }
 @keyframes toastOut { to { opacity: 0; transform: translateX(20px); } }
 .next-candle-reasons { padding: 4px 0 8px 8px; font-family: "JetBrains Mono", monospace; color: var(--fg-2); }
+
+/* ===== TREND BIAS PANEL ===== */
+.bias-badge {
+    display: block;
+    text-align: center;
+    padding: 10px 8px;
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 800;
+    font-size: 15px;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+.bias-bull   { background: rgba(8,153,129,0.18); color: #089981; border: 1px solid rgba(8,153,129,0.4); }
+.bias-bear   { background: rgba(242,54,69,0.18);  color: #f23645; border: 1px solid rgba(242,54,69,0.4); }
+.bias-neutral{ background: rgba(120,123,134,0.12); color: #787b86; border: 1px solid rgba(120,123,134,0.3); }
+.bias-breakdown {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    text-align: center;
+}
+.bias-fbull   { color: #089981; opacity: 0.9; }
+.bias-fbear   { color: #f23645; opacity: 0.9; }
+.bias-fneutral{ color: #787b86; opacity: 0.8; }
+
+/* Subtle chart tint on STRONG bias only */
+.tv-chart-container.bg-bull { box-shadow: inset 0 0 0 2px rgba(8,153,129,0.25); }
+.tv-chart-container.bg-bear { box-shadow: inset 0 0 0 2px rgba(242,54,69,0.25); }
+
+/* ===== TRADE PLAN PANEL ===== */
+.plan-empty { text-align:center; padding: 16px 8px; color: var(--fg-3); font-size:12px; opacity:0.7; }
+.plan-row {
+    display: grid;
+    grid-template-columns: 70px 80px 1fr;
+    gap: 6px;
+    align-items: center;
+    padding: 3px 0;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    border-bottom: 1px dashed rgba(120,123,134,0.15);
+}
+.plan-row:last-of-type { border-bottom: none; }
+.plan-row b { font-size: 12px; text-align: right; font-weight: 800; }
+.plan-sub { font-size: 9px; opacity: 0.6; text-align: right; }

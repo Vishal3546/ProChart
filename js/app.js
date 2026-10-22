@@ -35,6 +35,9 @@ class App {
         this.absEngine = new OrderFlowAbsorptionEngine();
         this.bigCandleDetector = new BigCandleDetector();
         this.nextCandlePredictor = new NextCandlePredictor();
+        this.trendBiasEngine = new TrendBiasEngine();
+        this.tradingPlanEngine = new TradingPlanEngine();
+        this.breakoutScanner = new BreakoutScanner();
         this.greeksEngine = new GreeksEngine();
 
         this.pollingInterval = null;
@@ -640,6 +643,120 @@ class App {
                 this.toast(`Big ${bc.dir} candle forming!`, bc.dir === 'bull' ? 'success' : 'danger', 3000);
             }
         } catch (e) {}
+
+        // Trend Bias (VWAP + EMA20/50 + RSI composite score)
+        try {
+            const tb = this.trendBiasEngine.analyze(data);
+            const el = document.getElementById('trendBiasResult');
+            if (el) {
+                el.textContent = tb.label;
+                el.className = 'bias-badge';
+                const map = { success: 'bias-bull', danger: 'bias-bear', muted: 'bias-neutral', info: 'bias-bull', warning: 'bias-bear' };
+                el.classList.add(map[tb.level] || 'bias-neutral');
+            }
+            const bd = document.getElementById('trendBiasBreakdown');
+            if (bd) {
+                const f = tb.factors;
+                const line = (name, v, bullTxt, bearTxt) => {
+                    const cls = v > 0 ? 'bias-fbull' : v < 0 ? 'bias-fbear' : 'bias-fneutral';
+                    const txt = v > 0 ? bullTxt : bearTxt;
+                    return `<div class="${cls}">${name}: ${txt}</div>`;
+                };
+                bd.innerHTML = [
+                    line('VWAP',  f.vwap,  'above ✓', 'below ✗'),
+                    line('EMA',   f.ema,   '20>50 ✓', '20<50 ✗'),
+                    line('RSI',   f.rsi,   '>50 ✓', '<50 ✗'),
+                ].join('');
+            }
+            // Optional: tint chart background subtly when bias is strong
+            const chartWrap = document.getElementById('mainTvChart');
+            if (chartWrap) {
+                chartWrap.classList.remove('bg-bull', 'bg-bear');
+                if (tb.bias === 'bull' && tb.score >= 2.5) chartWrap.classList.add('bg-bull');
+                else if (tb.bias === 'bear' && tb.score <= -2.5) chartWrap.classList.add('bg-bear');
+            }
+        } catch (e) { console.warn('trendBias err', e); }
+
+        // Trading plan (entry/sl/target) when bias is strong
+        try {
+            const plan = this.tradingPlanEngine.plan(data, tb);
+            const el = document.getElementById('tradePlanResult');
+            if (el && plan.ready) {
+                const sideColor = plan.direction === 'LONG' ? '#089981' : '#f23645';
+                const actionTxt = plan.actionable ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>' : `⏳ Pending (${Math.abs(plan.dist_pct).toFixed(2)}% away)`;
+                el.innerHTML = `
+                    <div style="font-size:13px;font-weight:800;color:${sideColor};margin-bottom:6px;text-align:center;">
+                        ${plan.direction} — ${actionTxt}
+                    </div>
+                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${plan.entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason}</span></div>
+                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${plan.sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason}</span></div>
+                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${plan.t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason}</span></div>
+                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${plan.t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-top:8px;font-size:10px;text-align:center;font-family:'JetBrains Mono',monospace;">
+                        <div>ATR<br><b>${plan.atr.toFixed(2)}</b></div>
+                        <div>RR1<br><b style="color:${plan.rr1>=1.5?'#089981':'#f23645'}">1:${plan.rr1.toFixed(2)}</b></div>
+                        <div>RR2<br><b style="color:${plan.rr2>=2?'#089981':'#ffae00'}">1:${plan.rr2.toFixed(2)}</b></div>
+                    </div>
+                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${plan.rr1>=1.5?'#089981':'#f23645'};">${plan.verdict}</div>
+                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹1L capital @ 1% risk): <b style="color:#fff">${plan.qty_1pct_risk_cap_1L}</b> shares</div>
+                `;
+                el.className = '';
+            } else if (el) {
+                el.textContent = plan.ready ? 'Wait for strong bias' : 'No strong bias yet';
+                el.className = 'plan-empty';
+            }
+        } catch (e) { console.warn('tradePlan err', e); }
+
+        // Breakout Scanner — detects VCP/coil breakouts with institutional volume
+        try {
+            const bo = this.breakoutScanner.scan(data);
+            const el = document.getElementById('breakoutResult');
+            if (!el) { /* skip */ }
+            else if (bo.detected) {
+                const color = bo.direction === 'LONG' ? '#089981' : '#f23645';
+                const arrow = bo.direction === 'LONG' ? '▲' : '▼';
+                el.innerHTML = `
+                    <div style="font-size:14px;font-weight:800;color:${color};text-align:center;margin-bottom:6px;">
+                        ${arrow} ${bo.direction} BREAKOUT ${bo.grade}
+                    </div>
+                    <div class="plan-row"><span>Pivot</span><b>${bo.pivot.toFixed(2)}</b></div>
+                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${bo.entry.toFixed(2)}</b></div>
+                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${bo.sl.toFixed(2)}</b></div>
+                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${bo.target1.toFixed(2)}</b></div>
+                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${bo.target.toFixed(2)}</b></div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:6px;font-size:10px;text-align:center;font-family:'JetBrains Mono',monospace;">
+                        <div>Vol<br><b style="color:${bo.volRatio>=1.5?'#089981':'#ffae00'}">${bo.volRatio.toFixed(1)}x</b></div>
+                        <div>Score<br><b>${bo.score}/10</b></div>
+                    </div>
+                    <div style="font-size:9px;opacity:0.8;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(120,123,134,0.2);">
+                        ${bo.reasons.slice(0,3).map(r => '• '+r).join('<br>')}
+                    </div>
+                `;
+                el.className = '';
+                // Toast alert on FIRST detection (dedup by key)
+                const key = `${this.activeSymbol}_${this.activeTimeframe}_${bo.direction}_${bo.pivot.toFixed(0)}`;
+                if (!this.lastSignalByKey[key] && isRealData && bo.score >= 7) {
+                    this.lastSignalByKey[key] = Date.now();
+                    this.toast(`${bo.direction} BREAKOUT on ${this.activeSymbol} @ ${bo.entry.toFixed(2)}`, bo.direction === 'LONG' ? 'success' : 'danger', 4000);
+                    this._pushFeed(`🚀 ${this.activeSymbol} ${bo.direction} BREAKOUT (score ${bo.score}/10, vol ${bo.volRatio.toFixed(1)}x)`, bo.direction.toLowerCase(), 'bo2');
+                }
+            } else if (bo.coming) {
+                el.innerHTML = `
+                    <div style="font-size:11px;text-align:center;color:#ffae00;font-weight:700;margin-bottom:4px;">
+                        🌀 COIL / SQUEEZE BUILDING
+                    </div>
+                    <div style="font-size:10px;opacity:0.9;font-family:'JetBrains Mono',monospace;">
+                        Watch Pivot ▲ <b>${bo.coming.pivotLong.toFixed(2)}</b><br>
+                        Or breakdown ▼ <b>${bo.coming.pivotShort.toFixed(2)}</b><br>
+                        BB width ${bo.coming.bbWidth.toFixed(2)}% — tight coil
+                    </div>
+                `;
+                el.className = '';
+            } else {
+                el.textContent = 'No breakout setup yet';
+                el.className = 'plan-empty';
+            }
+        } catch (e) { console.warn('breakoutScan err', e); }
 
         // Next candle AI forecast
         try {
