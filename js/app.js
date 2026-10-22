@@ -902,15 +902,28 @@ class App {
         this._pollInFlight = false;
     }
     startLiveQuotePolling() {
-        // Guard against double-start (page refresh / symbol switch / init re-runs)
         this._stopPolling();
+        // Single-tab lock via BroadcastChannel: only ONE tab polls/candles-fetches at a time
+        // (prevents the "4 tabs open = 4x API calls" problem).
+        try {
+            this._tabChan = new BroadcastChannel('prochart-tabs');
+            this._tabChan.onmessage = (e) => {
+                if (e.data === 'active') {
+                    // Another tab became active — this one goes passive (no REST polls)
+                    this._passiveTab = true;
+                    if (this.pollingInterval) { clearTimeout(this.pollingInterval); this.pollingInterval = null; }
+                }
+            };
+            this._tabChan.postMessage('active');
+            window.addEventListener('focus', () => { this._passiveTab = false; if (this._tabChan) this._tabChan.postMessage('active'); });
+        } catch(e) {}
+
         // Global singleton guard (prevents 2 App instances polling after dev reload)
         if (window.__prochartPoller && window.__prochartPoller !== this) {
             try { window.__prochartPoller._stopPolling(); } catch (e) {}
         }
         window.__prochartPoller = this;
 
-        // Clean up on page hide (stops in-flight timer before refresh so new page starts clean)
         window.addEventListener('pagehide', () => this._stopPolling(), { once: true });
         window.addEventListener('beforeunload', () => this._stopPolling(), { once: true });
 
@@ -1002,15 +1015,15 @@ class App {
         };
 
         const schedule = () => {
-            // 10s when market open (quote REST hits only when WS stale — see wsFresh check above);
-            // 30s when market closed. This matches AngelOne conservative pacing.
-            const baseMs = this.marketOpen ? 10000 : 30000;
+            // Quote polling is a SANITY FALLBACK ONLY when SSE/WS drops.
+            // When WS is live we use tick events to update LTP — NO REST calls.
+            const baseMs = this.liveWsConnected ? 60000 : 15000;  // 60s when live, 15s fallback
             const ms = Math.max(baseMs, backoffMs);
             this.refreshStatusBadge();
             this.pollingInterval = setTimeout(async () => { await tick(); schedule(); }, ms);
         };
-        // First tick after a generous delay (WS + candle load already finished by then)
-        setTimeout(tick, 8000);
+        // First tick after a generous delay (WS + candles fully loaded by then)
+        setTimeout(tick, 15000);
         schedule();
     }
 

@@ -305,7 +305,8 @@ def refresh_scrip():
 candle_cache = {}
 quote_cache = {}
 MAX_CACHE_SIZE = 50
-QUOTE_TTL = 3.0          # quote cache TTL (seconds) — prevents hammering every poll
+QUOTE_TTL = 8.0          # quote cache TTL (seconds) — 8s is plenty for LTP display
+MAX_CONCURRENT_SSE = 2   # hard cap on concurrent SSE streams (kills stale tabs)
 CANDLE_TTL = 60.0        # candle cache TTL (1 minute — very conservative for Angel)
 RATE_LIMIT_BACKOFF = 300 # 5 minutes after first hit
 _inflight_candle = {}    # per cache_key: single-flight guard
@@ -313,6 +314,8 @@ _last_candle_req = None  # monotonic timestamp of last Angel candle call (global
 GLOBAL_CANDLE_GAP = 3.0  # MINIMUM 3 seconds between ANY two Angel historical calls (Angel enforces strict per-IP limits)
 rate_limited_candles = {}
 rate_limited_quotes = {}
+_last_quote_req = 0.0    # global throttle for quote REST
+GLOBAL_QUOTE_GAP = 1.5   # minimum 1.5s between ANY two quote REST calls (Angel ~1/s)
 
 
 def cache_cleanup():
@@ -376,6 +379,18 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
         if now_ts - ct < QUOTE_TTL:
             return cd
 
+    if rate_limited_quotes.get("__GLOBAL__", 0) > now_ts:
+        if qkey in quote_cache: return quote_cache[qkey][1]
+        return {"status": False, "message": "Quote cooldown", "rate_limited": True}
+
+    # Global throttle (don't hammer Angel quote API from concurrent SSE broadcasters)
+    global _last_quote_req
+    gap = now_ts - _last_quote_req
+    if gap < GLOBAL_QUOTE_GAP:
+        if qkey in quote_cache: return quote_cache[qkey][1]
+        return {"status": False, "message": "Throttled", "throttled": True}
+    _last_quote_req = now_ts
+
     if not jwt_token:
         return {"status": False, "message": "Not logged in"}
 
@@ -386,6 +401,7 @@ def get_quote(exchange: str = "NSE", token: str = "99926000", symbol: str = ""):
         text = res.text or ""
         if "Access denied" in text or "exceeding access rate" in text:
             rate_limited_quotes[qkey] = now_ts + RATE_LIMIT_BACKOFF
+            rate_limited_quotes["__GLOBAL__"] = now_ts + 60  # 60s global quote cooldown
             print(f"⚠️ Quote rate-limited for {qkey}, backoff {RATE_LIMIT_BACKOFF}s")
             if qkey in quote_cache:
                 return quote_cache[qkey][1]
@@ -454,22 +470,31 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
     token = str(token or "").strip()
     sse_key = f"{exchange}:{token}:{interval}"
 
-    # Drop any existing SSE for the same key (stale tab / refresh)
-    prev = _active_sse.pop(sse_key, None)
-    if prev is not None:
-        try: prev[1].set_result(True)  # signal disconnect
-        except Exception: pass
+    # --- Hard cap on concurrent SSE per (exchange,token) ---
+    # Prevent quote flooding from stale tabs / F5 refreshes that don't disconnect cleanly.
+    same_token_count = sum(1 for k in _active_sse if k.startswith(f"{exchange}:{token}:"))
+    if same_token_count >= MAX_CONCURRENT_SSE:
+        # Drop the oldest (stale) connection(s) for this token
+        to_drop = [k for k in _active_sse if k.startswith(f"{exchange}:{token}:")][:same_token_count - MAX_CONCURRENT_SSE + 1]
+        for k in to_drop:
+            prev = _active_sse.pop(k, None)
+            if prev:
+                try: prev[1].set_result(True)
+                except Exception: pass
+        print(f"♻️ Dropped {len(to_drop)} stale SSE connections for {exchange}:{token} (max {MAX_CONCURRENT_SSE})")
 
     import asyncio
     my_q = asyncio.Queue(maxsize=50)
     my_disc = asyncio.get_running_loop().create_future()
     _active_sse[sse_key] = (my_q, my_disc)
 
+    # State shared between event_gen and _broadcaster (mutable dict to avoid closure scoping bug)
+    _state = {"last_tick_ts": 0.0, "last_candle_key": None}
+
     if token and feed_token:
         live_ws.subscribe_only(exchange, token)
 
     async def event_gen():
-        last_tick_ts = 0.0
         last_candle_key = None
         try:
             yield f"event: status\ndata: {json.dumps(live_ws.status())}\n\n"
@@ -482,16 +507,15 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
                 try:
                     evt = await asyncio.wait_for(my_q.get(), timeout=0.5)
                 except asyncio.TimeoutError:
-                    # Heartbeat every 15s to keep proxy alive
-                    if time.time() - last_tick_ts > 15:
+                    if time.time() - _state["last_tick_ts"] > 15:
                         yield ": ping\n\n"
-                        last_tick_ts = time.time()
+                        _state["last_tick_ts"] = time.time()
                     continue
                 if evt["type"] == "tick":
                     t = evt["data"]
                     now_ts = t["ts"]
-                    if now_ts - last_tick_ts >= 0.25:
-                        last_tick_ts = now_ts
+                    if now_ts - _state["last_tick_ts"] >= 0.5:
+                        _state["last_tick_ts"] = now_ts
                         yield f"event: tick\ndata: {json.dumps(t)}\n\n"
                 elif evt["type"] == "candle":
                     c = evt["data"]
@@ -502,13 +526,16 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
         finally:
             _active_sse.pop(sse_key, None)
 
-    # Background broadcaster: pushes WS quotes/candles into THIS client's queue
+    # Background broadcaster: pushes WS quotes/candles into THIS client's queue.
+    # IMPORTANT: uses live_ws.quote() which reads from in-memory tick cache — NO REST
+    # calls. This is the fix for the "quote API spamming" flood that triggers Angel
+    # rate-limits when multiple SSE connections are open.
     async def _broadcaster():
         while not my_disc.done() and not await request.is_disconnected():
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)  # 2 Hz tick rate is plenty
             try: q = live_ws.quote(exchange, token)
             except Exception: q = None
-            if q:
+            if q and (time.time() - last_tick_ts) >= 0.5:
                 try: my_q.put_nowait({"type":"tick","data":{
                     "ltp":q["ltp"],"day_open":q["day_open"],"day_high":q["day_high"],
                     "day_low":q["day_low"],"volume":q["day_volume"],"oi":q.get("oi",0),
