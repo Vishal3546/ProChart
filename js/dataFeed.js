@@ -52,13 +52,21 @@ class DataFeed {
                     try { const j = await res.json(); retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 60; } catch(_){}
                     this._candleCooldownUntil = Date.now() + retry * 1000;
                     console.warn(`Candle 429 — cooling down ${retry}s for ${cKey}`);
+                    // Return localStorage cache if present (TradingView-style)
+                    const cached = this._loadLocalCache(symbol, timeframe);
+                    if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                     throw new Error(`Rate limited (${retry}s)`);
                 }
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
-                    return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
+                    const candles = this.formatCandles(data.candles);
+                    if (data.source === 'AngelOne') this._saveLocalCache(symbol, timeframe, candles);
+                    return { candles, source: data.source || 'unknown' };
                 }
+                // Server sent empty/loading — try local cache
+                const cached = this._loadLocalCache(symbol, timeframe);
+                if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                 throw new Error('Empty response');
             } catch (err) {
                 if (err && err.name === 'AbortError') throw err;
@@ -119,6 +127,29 @@ class DataFeed {
                 message: data.message || '',
             };
         } catch (e) { return { results: [], loaded: false, message: 'Search error' }; }
+    }
+
+    // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
+    _cacheKey(symbol, tf) { return `pc_cdl_${symbol}_${tf}`; }
+    _saveLocalCache(symbol, tf, candles) {
+        try {
+            // Trim to last 500 candles & store (localStorage ~5MB limit)
+            const trimmed = candles.slice(-500);
+            localStorage.setItem(this._cacheKey(symbol, tf), JSON.stringify({ t: Date.now(), c: trimmed }));
+        } catch(e) {}
+    }
+    _loadLocalCache(symbol, tf) {
+        try {
+            const raw = localStorage.getItem(this._cacheKey(symbol, tf));
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj || !obj.c || !Array.isArray(obj.c)) return null;
+            // Use cache if < 24h old (intraday) or < 7 days (daily)
+            const age = Date.now() - (obj.t || 0);
+            const maxAge = tf === 'D' ? 7*86400*1000 : 8*3600*1000;  // 8h intraday, 7d daily
+            if (age > maxAge) return null;
+            return this.formatCandles(obj.c);
+        } catch(e) { return null; }
     }
 
     formatCandles(rawCandles) {

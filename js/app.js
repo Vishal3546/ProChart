@@ -74,13 +74,25 @@ class App {
         // and avoids slamming Angel API on page open (TradingView-style).
         this.connectLiveStream();
         this.startLiveQuotePolling();
-        // Staggered candle load: wait for first WS tick or 4s whichever first,
+        // INSTANT chart from localStorage cache (TradingView-style — zero delay)
+        try {
+            const cached = this.dataFeed._loadLocalCache(this.activeSymbol, this.activeTimeframe);
+            if (cached && cached.length) {
+                this.tvBridge.setCandleData(cached);
+                this.source = 'LocalCache';
+                this.setConnectionStatus(false, 'LocalCache');
+                requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(cached); });
+                const last = cached[cached.length-1];
+                this.prevClose = last.close; this.lastLtp = last.close;
+                this.updateHeaderPrice(last.close, 0, last.close);
+            }
+        } catch(e){}
+        // Staggered live candle fetch: wait for first WS tick or 5s whichever first,
         // then fire candles. Server throttle handles the rest.
         await new Promise(resolve => {
             const done = () => { this._initCandleWait=null; resolve(); };
-            const start = Date.now();
             this._initCandleWait = done;
-            setTimeout(done, 4000);  // max 4s wait
+            setTimeout(done, 5000);  // max 5s wait after WS up
         });
         await this.loadChartData(this.activeSymbol, this.activeTimeframe);
     }
@@ -990,14 +1002,15 @@ class App {
         };
 
         const schedule = () => {
-            const baseMs = this.marketOpen ? 3000 : 15000;
+            // 10s when market open (quote REST hits only when WS stale — see wsFresh check above);
+            // 30s when market closed. This matches AngelOne conservative pacing.
+            const baseMs = this.marketOpen ? 10000 : 30000;
             const ms = Math.max(baseMs, backoffMs);
-            // Refresh badge each loop (catches market open→close transition)
             this.refreshStatusBadge();
             this.pollingInterval = setTimeout(async () => { await tick(); schedule(); }, ms);
         };
-        // First tick after small delay (gives time for candles to load)
-        setTimeout(tick, 1500);
+        // First tick after a generous delay (WS + candle load already finished by then)
+        setTimeout(tick, 8000);
         schedule();
     }
 

@@ -436,60 +436,105 @@ def ws_status():
     return live_ws.status()
 
 
+# ---------- Active SSE client registry (one per exchange:token to prevent leaks) ----------
+_active_sse = {}  # key -> (queue, disconnect future)
+
 @app.get("/api/ticks/stream")
 async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "", interval: str = "15"):
     """
     Server-Sent Events (SSE) stream that pushes:
-      - 'tick' events: every LTP tick (throttled to ~5/sec per client)
+      - 'tick' events: every LTP tick (throttled to ~4/sec per client)
       - 'candle' events: whenever the forming candle changes
+    Only ONE SSE per exchange:token is kept alive (newer client supersedes old one
+    to prevent EventSource leaks from page refreshes/rapid TF switches).
     Browser connects via EventSource('/api/ticks/stream?exchange=NSE&token=2885&interval=15').
     """
     from fastapi.responses import StreamingResponse as _SR
     exchange = (exchange or "NSE").strip().upper()
     token = str(token or "").strip()
+    sse_key = f"{exchange}:{token}:{interval}"
+
+    # Drop any existing SSE for the same key (stale tab / refresh)
+    prev = _active_sse.pop(sse_key, None)
+    if prev is not None:
+        try: prev[1].set_result(True)  # signal disconnect
+        except Exception: pass
+
+    import asyncio
+    my_q = asyncio.Queue(maxsize=50)
+    my_disc = asyncio.get_running_loop().create_future()
+    _active_sse[sse_key] = (my_q, my_disc)
+
+    if token and feed_token:
+        live_ws.subscribe_only(exchange, token)
 
     async def event_gen():
         last_tick_ts = 0.0
         last_candle_key = None
-        yield f"event: status\ndata: {json.dumps(live_ws.status())}\n\n"
-        if token and feed_token:
-            live_ws.subscribe(exchange, token)
-        while True:
-            # Detect client disconnect to avoid CancelledError spam on shutdown/F5
-            if await request.is_disconnected():
-                break
+        try:
+            yield f"event: status\ndata: {json.dumps(live_ws.status())}\n\n"
+            while True:
+                # Disconnect if client gone OR superseded by newer SSE on same key
+                if await request.is_disconnected():
+                    break
+                if my_disc.done():
+                    break
+                try:
+                    evt = await asyncio.wait_for(my_q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    # Heartbeat every 15s to keep proxy alive
+                    if time.time() - last_tick_ts > 15:
+                        yield ": ping\n\n"
+                        last_tick_ts = time.time()
+                    continue
+                if evt["type"] == "tick":
+                    t = evt["data"]
+                    now_ts = t["ts"]
+                    if now_ts - last_tick_ts >= 0.25:
+                        last_tick_ts = now_ts
+                        yield f"event: tick\ndata: {json.dumps(t)}\n\n"
+                elif evt["type"] == "candle":
+                    c = evt["data"]
+                    ck = f"{c['time']}_{c['close']}_{c['volume']}"
+                    if ck != last_candle_key:
+                        last_candle_key = ck
+                        yield f"event: candle\ndata: {json.dumps(c)}\n\n"
+        finally:
+            _active_sse.pop(sse_key, None)
+
+    # Background broadcaster: pushes WS quotes/candles into THIS client's queue
+    async def _broadcaster():
+        while not my_disc.done() and not await request.is_disconnected():
             await asyncio.sleep(0.2)
-            try:
-                q = live_ws.quote(exchange, token)
-            except Exception:
-                q = None
-            now_ts = time.time()
-            if q and (now_ts - last_tick_ts) >= 0.25:
-                last_tick_ts = now_ts
-                payload = {
-                    "ltp": q["ltp"], "day_open": q["day_open"],
-                    "day_high": q["day_high"], "day_low": q["day_low"],
-                    "volume": q["day_volume"], "oi": q.get("oi", 0),
-                    "prev_close": q["prev_close"], "ts": now_ts,
-                }
-                yield f"event: tick\ndata: {json.dumps(payload)}\n\n"
+            try: q = live_ws.quote(exchange, token)
+            except Exception: q = None
+            if q:
+                try: my_q.put_nowait({"type":"tick","data":{
+                    "ltp":q["ltp"],"day_open":q["day_open"],"day_high":q["day_high"],
+                    "day_low":q["day_low"],"volume":q["day_volume"],"oi":q.get("oi",0),
+                    "prev_close":q["prev_close"],"ts":time.time(),
+                }})
+                except asyncio.QueueFull: pass
             try:
                 fc = live_ws.forming_candle(exchange, token, interval)
-            except Exception:
-                fc = None
+            except Exception: fc = None
             if fc:
-                ck = f"{fc['time']}_{fc['close']}_{fc['volume']}"
-                if ck != last_candle_key:
-                    last_candle_key = ck
-                    yield f"event: candle\ndata: {json.dumps(fc)}\n\n"
+                try: my_q.put_nowait({"type":"candle","data":fc})
+                except asyncio.QueueFull: pass
 
+    broadcaster_task = asyncio.create_task(_broadcaster())
     headers = {
         "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
+        "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
-    return _SR(event_gen(), headers=headers, media_type="text/event-stream")
+    try:
+        return _SR(event_gen(), headers=headers, media_type="text/event-stream")
+    finally:
+        broadcaster_task.cancel()
+
+# Old inlined event_gen code removed (replaced above)
 
 
 @app.get("/api/candles")
@@ -590,14 +635,17 @@ async def get_candles(
     if gap < GLOBAL_CANDLE_GAP:
         await asyncio.sleep(GLOBAL_CANDLE_GAP - gap)
 
-    # --- 5. Normalize date range (no seconds/milliseconds = stable requests) ---
+    # --- 5. Normalize date range (no seconds/milliseconds = stable requests)
+    # Angel One official limits per request (Aug 2024 release):
+    #   1m / 3m    : ~30 days
+    #   5m         : ~100 days
+    #   15m / 30m  : ~200 days
+    #   1H         : ~200 days
+    #   D          : ~365 days (2000 candles)
+    # Using these windows prevents "Access denied" false-positives from oversized requests. ---
     end_dt = datetime.now(IST).replace(second=0, microsecond=0)
-    if interval == "D":
-        start_dt = end_dt - timedelta(days=365)
-    elif interval in ("60", "30"):
-        start_dt = end_dt - timedelta(days=60)
-    else:
-        start_dt = end_dt - timedelta(days=15)
+    days_map = {"1":30,"3":30,"5":100,"15":200,"30":200,"60":200,"D":365}
+    start_dt = end_dt - timedelta(days=days_map.get(interval, 30))
 
     params = {
         "exchange": exchange,
@@ -607,19 +655,42 @@ async def get_candles(
         "todate":   end_dt.strftime("%Y-%m-%d %H:%M"),
     }
 
-    loop = asyncio.get_running_loop()
     _inflight_candle[cache_key] = True
-    _last_candle_req = time.monotonic()
     data = None
     err = None
     try:
         def _do_call():
             return smart_api.getCandleData(params) if (smart_api and jwt_token) else None
         data = await asyncio.to_thread(_do_call)
+        # Cold-session false-positive retry: Angel occasionally 429s the VERY FIRST call
+        # after login even at well within limits (forum-confirmed bug since 2026-08).
+        # One retry after 2s usually resolves it.
+        if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
+            print(f"ℹ️ Cold-session rate-limit blip for {cache_key} — retrying once after 2s (known Angel bug)")
+            _last_candle_req = time.monotonic() + 2.0  # respect throttle during retry wait
+            await asyncio.sleep(2.0)
+            data = await asyncio.to_thread(_do_call)
+        elif isinstance(data, dict) and not data.get("status"):
+            msg = str(data.get("message",""))
+            if "Access denied" in msg or "exceeding access rate" in msg:
+                print(f"ℹ️ Cold-session rate-limit blip (dict) for {cache_key} — retrying once after 2s")
+                _last_candle_req = time.monotonic() + 2.0
+                await asyncio.sleep(2.0)
+                data = await asyncio.to_thread(_do_call)
     except Exception as e:
         err = str(e)
+        if "Couldn't parse the JSON" in err or "Access denied" in err:
+            print(f"ℹ️ Cold-session exception blip for {cache_key} — retrying once after 2s")
+            _last_candle_req = time.monotonic() + 2.0
+            await asyncio.sleep(2.0)
+            try:
+                data = await asyncio.to_thread(lambda: smart_api.getCandleData(params) if (smart_api and jwt_token) else None)
+                err = None
+            except Exception as e2:
+                err = str(e2)
     finally:
         _inflight_candle.pop(cache_key, None)
+        _last_candle_req = time.monotonic()
 
     # --- 6. Detect rate-limit (covers both exception AND plain-string/non-dict response) ---
     rate_hit = False
