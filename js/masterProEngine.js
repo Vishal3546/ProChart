@@ -72,18 +72,17 @@ class MasterProEngine {
             }
         }
 
-        // 4) RSI REGIME
+        // 4) RSI REGIME (must be valid 0-100 number; early bars return 0 which is not an oversold signal)
         const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        const rsi = rsiArr[n - 1];
+        let rsi = rsiArr[n - 1];
+        if (!isFinite(rsi) || rsi <= 0 || rsi >= 100) rsi = 50;  // invalid / not enough data → neutral
         let rsiLabel = 'NEUTRAL';
         let rsiLevel = 'muted';
-        if (rsi != null) {
-            if (rsi >= 75)      { rsiLabel = '🔥 OVERBOUGHT'; rsiLevel = 'danger'; }
-            else if (rsi >= 60) { rsiLabel = '↗ BULL ZONE';   rsiLevel = 'success'; }
-            else if (rsi <= 25) { rsiLabel = '🧊 OVERSOLD';   rsiLevel = 'success'; }
-            else if (rsi <= 40) { rsiLabel = '↘ BEAR ZONE';   rsiLevel = 'danger'; }
-            else                { rsiLabel = '➡ NEUTRAL';     rsiLevel = 'muted'; }
-        }
+        if (rsi >= 70)      { rsiLabel = '🔥 OVERBOUGHT'; rsiLevel = 'danger'; }
+        else if (rsi >= 60) { rsiLabel = '↗ BULL ZONE';   rsiLevel = 'success'; }
+        else if (rsi <= 30) { rsiLabel = '🧊 OVERSOLD';   rsiLevel = 'success'; }
+        else if (rsi <= 40) { rsiLabel = '↘ BEAR ZONE';   rsiLevel = 'danger'; }
+        else                { rsiLabel = '➡ NEUTRAL';     rsiLevel = 'muted'; }
 
         // Composite score (-4 to +4)
         let score = 0;

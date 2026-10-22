@@ -55,41 +55,69 @@ class TradingPlanEngine {
         const atrP = Math.min(14, trs.length);
         let atr = trs.slice(-atrP).reduce((s, x) => s + x, 0) / atrP;
 
-        // Swing low/high over last 8 bars
-        const lookback = Math.min(8, n - 1);
+        // Swing low/high: detect PROPER swing pivot (not just min/max of lookback window).
+        // A swing low is a bar whose low is LOWER than 2 bars on either side.
+        // A swing high is a bar whose high is HIGHER than 2 bars on either side.
+        const pivotWindow = 2;
         let swingLow = Infinity, swingHigh = -Infinity;
-        for (let i = n - lookback; i < n; i++) {
-            if (lows[i] < swingLow) swingLow = lows[i];
-            if (highs[i] > swingHigh) swingHigh = highs[i];
+        for (let i = n - Math.min(25, n); i < n - pivotWindow; i++) {
+            if (i <= pivotWindow) continue;
+            let isSL = true, isSH = true;
+            for (let k = i - pivotWindow; k <= i + pivotWindow; k++) {
+                if (k === i) continue;
+                if (lows[k] < lows[i]) isSL = false;
+                if (highs[k] > highs[i]) isSH = false;
+            }
+            if (isSL && lows[i] < swingLow) swingLow = lows[i];
+            if (isSH && highs[i] > swingHigh) swingHigh = highs[i];
+        }
+        // Fallback: if no proper pivot detected in window, use bar-count lookback min/max
+        // BUT for longs we look at LOWS of last 10 bars (not last 8) to find the support below LTP
+        if (!isFinite(swingLow)) {
+            swingLow = Math.min(...lows.slice(-10));
+        }
+        if (!isFinite(swingHigh)) {
+            swingHigh = Math.max(...highs.slice(-10));
         }
 
         const isBull = bias.bias === 'bull';
         let entry, sl, t1, t2, entryReason, slReason, t1Reason;
 
         if (isBull) {
-            // Entry: pullback to EMA20 or VWAP (whichever is closer to LTP but below)
-            const candidates = [ema20, vwap].filter(x => x < ltp);
-            entry = candidates.length ? Math.max(...candidates) : Math.min(ema20, vwap);
-            entryReason = entry.toFixed(2) === ema20.toFixed(2) ? 'EMA20 pullback' : 'VWAP pullback';
-            // Stop: below recent swing low with ATR buffer
+            // --- LONG plan: SL MUST be below entry, T2 MUST be above T1 ---
+            // Entry: pullback to EMA20 OR VWAP (pick the closer of the two that is BELOW LTP,
+            // i.e. price hasn't broken too far away). If both are above (extended),
+            // buy current LTP (momentum breakout trade).
+            const belowLtp = [ema20, vwap].filter(x => x < ltp);
+            entry = belowLtp.length ? Math.max(...belowLtp) : ltp;
+            entryReason = entry.toFixed(2) === ltp.toFixed(2) ? 'Breakout / momentum' :
+                          (entry.toFixed(2) === ema20.toFixed(2) ? 'EMA20 pullback' : 'VWAP pullback');
+            // SL: below nearest valid swing low with ATR buffer. If calculated SL ends up
+            // ABOVE entry (edge case), fall back to entry - 1.5*ATR.
             sl = swingLow - 0.25 * atr;
-            slReason = `Swing low ${swingLow.toFixed(2)} - 0.25 ATR`;
-            // Target 1: BB upper or recent high (nearest resistance above LTP)
+            if (sl >= entry) sl = entry - 1.5 * atr;
+            slReason = (swingLow < entry) ? `Swing low ${swingLow.toFixed(2)} - 0.25 ATR` : '1.5 ATR stop';
+            // T1: nearest resistance above entry (BB upper or recent swing high, whichever is closer)
             t1 = Math.min(bbUpper, swingHigh + 0.5 * atr);
-            t1 = Math.max(t1, ltp + atr);  // at least 1 ATR away
+            if (t1 <= entry) t1 = entry + Math.max(atr, (entry - sl) * 1.5);  // safety floor
             t1Reason = 'BB upper / swing high';
-            t2 = ltp + (ltp - sl) * 2;     // 1:2 RR
+            // T2: fixed 1:2 RR extension (MUST be above T1)
+            t2 = entry + (entry - sl) * 2;
+            if (t2 <= t1) t2 = t1 + Math.abs(t1 - entry);  // safety
         } else {
-            // BEAR plan
-            const candidates = [ema20, vwap].filter(x => x > ltp);
-            entry = candidates.length ? Math.min(...candidates) : Math.max(ema20, vwap);
-            entryReason = entry.toFixed(2) === ema20.toFixed(2) ? 'EMA20 pullback' : 'VWAP pullback';
+            // --- SHORT plan: SL MUST be above entry, T2 MUST be below T1 ---
+            const aboveLtp = [ema20, vwap].filter(x => x > ltp);
+            entry = aboveLtp.length ? Math.min(...aboveLtp) : ltp;
+            entryReason = entry.toFixed(2) === ltp.toFixed(2) ? 'Breakdown / momentum' :
+                          (entry.toFixed(2) === ema20.toFixed(2) ? 'EMA20 pullback' : 'VWAP pullback');
             sl = swingHigh + 0.25 * atr;
-            slReason = `Swing high ${swingHigh.toFixed(2)} + 0.25 ATR`;
+            if (sl <= entry) sl = entry + 1.5 * atr;
+            slReason = (swingHigh > entry) ? `Swing high ${swingHigh.toFixed(2)} + 0.25 ATR` : '1.5 ATR stop';
             t1 = Math.max(bbLower, swingLow - 0.5 * atr);
-            t1 = Math.min(t1, ltp - atr);
+            if (t1 >= entry) t1 = entry - Math.max(atr, (sl - entry) * 1.5);
             t1Reason = 'BB lower / swing low';
-            t2 = ltp - (sl - ltp) * 2;
+            t2 = entry - (sl - entry) * 2;
+            if (t2 >= t1) t2 = t1 - Math.abs(entry - t1);
         }
 
         const risk = Math.abs(entry - sl);

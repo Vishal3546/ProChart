@@ -51,9 +51,10 @@ class TrendBiasEngine {
         }
         const vwap = v ? pv / v : lastClose;
 
-        // RSI
+        // RSI (returns numeric array; early bars = 0 → treat as 50 neutral)
         const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        const rsi = rsiArr.length ? rsiArr[rsiArr.length - 1].value : 50;
+        let rsi = rsiArr.length ? rsiArr[rsiArr.length - 1] : 50;
+        if (!isFinite(rsi) || rsi <= 0 || rsi >= 100) rsi = 50;
 
         // MACD histogram
         const macd = TechnicalIndicators.MACD(candles);
@@ -73,11 +74,21 @@ class TrendBiasEngine {
         score = factors.vwap + factors.ema + factors.rsi + factors.macd + factors.pxema + factors.st;
 
         let label, level, bias;
-        if (score >= 2.5) { label = '🟢 STRONG LONG'; level = 'success'; bias = 'bull'; }
-        else if (score >= 1.5) { label = '🟢 LONG BIAS'; level = 'success'; bias = 'bull'; }
-        else if (score > -1.5) { label = '⚪ NEUTRAL / CHOP'; level = 'muted'; bias = 'neutral'; }
-        else if (score > -2.5) { label = '🔴 SHORT BIAS'; level = 'danger'; bias = 'bear'; }
-        else { label = '🔴 STRONG SHORT'; level = 'danger'; bias = 'bear'; }
+        const bearCount = Object.values(factors).filter(v => v < 0).length;
+        const bullCount = Object.values(factors).filter(v => v > 0).length;
+        // Strong requires high score AND ZERO major bearish factors (RSI/EMA/VWAP all aligned).
+        // 1 minor bearish (e.g. RSI<50 but everything else bullish) → demote to "LONG BIAS" not "STRONG".
+        if (score >= 2.5 && factors.rsi >= 0 && factors.vwap >= 0 && factors.ema >= 0) {
+            label = '🟢 STRONG LONG'; level = 'success'; bias = 'bull';
+        } else if (score >= 1.5) {
+            label = '🟢 LONG BIAS'; level = 'success'; bias = 'bull';
+        } else if (score <= -2.5 && factors.rsi <= 0 && factors.vwap <= 0 && factors.ema <= 0) {
+            label = '🔴 STRONG SHORT'; level = 'danger'; bias = 'bear';
+        } else if (score <= -1.5) {
+            label = '🔴 SHORT BIAS'; level = 'danger'; bias = 'bear';
+        } else {
+            label = '⚪ NEUTRAL / CHOP'; level = 'muted'; bias = 'neutral';
+        }
 
         return { score, label, level, bias, factors, ema20, ema50, vwap, rsi, macdHist, st };
     }
