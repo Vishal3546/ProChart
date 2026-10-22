@@ -83,6 +83,11 @@ class TradingPlanEngine {
         const isBull = bias.bias === 'bull';
         let entry, sl, t1, t2, entryReason, slReason, t1Reason;
 
+        // --- Guard against ATR=0 (new/illiquid/too-few bars): can't compute a plan ---
+        if (!isFinite(atr) || atr <= 0) {
+            return { ready: false, reason: 'Not enough bars / ATR=0 — switch timeframe or wait' };
+        }
+
         if (isBull) {
             // --- LONG plan: SL MUST be below entry, T2 MUST be above T1 ---
             // Entry: pullback to EMA20 OR VWAP (pick the closer of the two that is BELOW LTP,

@@ -241,30 +241,34 @@ class TVBridge {
 
     // ---------- data ----------
     setCandleData(data) {
-        if (!this.series || !this.series.main) return;  // chart not initialized yet
+        if (!this.series || !this.series.main) return;
         if (!data || !data.length) return;
-        // Defensive: drop null/NaN/duplicate-timestamp candles that cause LW "Cannot read properties of null (reading 'from')"
+        // Light cleaning: sort by time + drop clearly invalid rows, preserve all valid candles.
+        // (Heavy filtering here was dropping large swathes of valid intraday candles.)
+        const rows = [];
         const seen = new Set();
-        const clean = [];
         for (const d of data) {
             if (!d) continue;
             const t = this._toSec(d.time);
-            if (t <= 0) continue;
-            const o=+d.open, h=+d.high, l=+d.low, c=+d.close;
-            if (!isFinite(o)||!isFinite(h)||!isFinite(l)||!isFinite(c)) continue;
-            if (h < l || o <= 0 || c <= 0) continue;
-            if (seen.has(t)) continue;  // duplicate time — LW hates that
+            if (!(t > 0)) continue;
+            const o = +d.open, h = +d.high, l = +d.low, c = +d.close;
+            if (!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(c)) continue;
+            if (!(h >= l) || !(o > 0) || !(c > 0)) continue;
+            if (seen.has(t)) continue;
             seen.add(t);
-            clean.push({time:t, open:o, high:h, low:l, close:c, volume:d.volume});
+            rows.push({ time: t, open: o, high: Math.max(o, h, c), low: Math.min(o, l, c), close: c, volume: d.volume });
         }
-        if (clean.length < 2) return;
-        this.currentData = clean.sort((a, b) => a.time - b.time);
-        const fmt = this._fmt(this.currentData);
-        const vFmt = this._fmtVol(this.currentData);
-        if (!fmt.length || !vFmt.length) return;
-        try { this.series.main.setData(fmt); } catch(e){ console.warn('main.setData failed', e.message); }
-        try { this.series.vol.setData(vFmt); } catch(e){ console.warn('vol.setData failed', e.message); }
-        this._anchorToLatest(fmt.length);
+        if (rows.length < 2) return;
+        rows.sort((a, b) => a.time - b.time);
+        this.currentData = rows;
+        const fmt = rows.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close }));
+        const vFmt = rows.map(d => ({
+            time: d.time, value: +(d.volume || 0),
+            color: d.close >= d.open ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
+        }));
+        try { this.series.main.setData(fmt); } catch(e) { console.warn('main.setData', e.message); }
+        try { this.series.vol.setData(vFmt); } catch(e) { console.warn('vol.setData', e.message); }
+        this._anchorToLatest(rows.length);
     }
 
     _anchorToLatest(n) {

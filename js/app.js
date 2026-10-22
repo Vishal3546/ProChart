@@ -614,18 +614,27 @@ class App {
         }
     }
 
-    /** Strip extreme outlier candles (>70% gap) — prevents NIFTY fallback / corrupted data */
+    /** Strip extreme outlier candles (>50% gap AND single-bar spike = high<next_low or low>next_high) */
     _sanitizeCandles(candles, symbol) {
         if (!candles || candles.length <= 5) return candles || [];
         const sane = [candles[0]];
-        for (let i = 1; i < candles.length; i++) {
-            const c = candles[i], prev = sane[sane.length - 1];
-            const gap = Math.abs(c.close - prev.close) / prev.close;
-            if (gap > 0.7 && prev.close > 0) {
-                sane.push({ ...c, open: prev.close, high: prev.close*1.005, low: prev.close*0.995, close: prev.close, volume: c.volume });
-            } else { sane.push(c); }
+        for (let i = 1; i < candles.length - 1; i++) {
+            const c = candles[i], prev = candles[i-1], nxt = candles[i+1];
+            if (!c || !prev || !nxt) { sane.push(c); continue; }
+            const upGapPct = (c.high - Math.max(prev.high, nxt.high)) / Math.max(prev.close, nxt.close);
+            const dnGapPct = (Math.min(prev.low, nxt.low) - c.low) / Math.min(prev.close, nxt.close);
+            // Drop candle only if it spikes >50% AWAY from both neighbours and immediately
+            // reverses (classic one-bar data corruption — not a real move).
+            if (c.high > Math.max(prev.high, nxt.high) && upGapPct > 0.5 && c.close < c.high * 0.6) {
+                continue;
+            }
+            if (c.low < Math.min(prev.low, nxt.low) && dnGapPct > 0.5 && c.close > c.low * 1.6) {
+                continue;
+            }
+            sane.push(c);
         }
-        if (symbol) this._lastGoodPrice[symbol] = sane[sane.length-1].close;
+        sane.push(candles[candles.length - 1]);
+        if (symbol && sane.length) this._lastGoodPrice[symbol] = sane[sane.length-1].close;
         return sane;
     }
 
@@ -826,7 +835,7 @@ class App {
                 `;
                 el.className = '';
             } else if (el) {
-                el.textContent = plan.ready ? 'Wait for strong bias' : 'No strong bias yet';
+                el.innerHTML = `<div style="font-size:11px;text-align:center;opacity:0.7;padding:12px 6px;">${plan && plan.reason ? plan.reason : 'No strong bias yet'}</div>`;
                 el.className = 'plan-empty';
             }
         } catch (e) { console.warn('tradePlan err', e); }
