@@ -92,9 +92,9 @@ class App {
         await new Promise(resolve => {
             const done = () => { this._initCandleWait=null; resolve(); };
             this._initCandleWait = done;
-            setTimeout(done, 5000);  // max 5s wait after WS up
+            setTimeout(done, 8000);  // 8s warmup after WS up (Angel cold-session bug needs 5-10s gate before first historical call)
         });
-        await this.loadChartData(this.activeSymbol, this.activeTimeframe);
+        await this.loadChartData(this.activeSymbol, this.activeTimeframe, { firstLoad: true });
     }
 
     // --------------- LIVE WS (SSE) ---------------
@@ -525,6 +525,7 @@ class App {
 
     async loadChartData(symbol, tf, opts = {}) {
         const isRetry = !!opts.retry;
+        const isFirstLoad = !!opts.firstLoad;
         this.activeSymbol = symbol;
         localStorage.setItem('prochart_symbol', symbol);
 
@@ -532,7 +533,7 @@ class App {
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
-        // Only (re)subscribe WS on initial load / symbol change / TF change (NOT on 429 retry)
+        // Connect WS only on first load / symbol change / TF change (NOT on retry or auto-reload)
         if (!isRetry) this.connectLiveStream();
 
         const meta = { token: this.activeToken, exchange: this.activeExchange,

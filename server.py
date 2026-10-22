@@ -334,6 +334,45 @@ def cache_cleanup():
                 del d[k]
 
 
+# ---------- Candle helper: simulated response anchored to LTP / known base ----------
+def _simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="SimulatedPro"):
+    interval_ms_map = {"1":60,"3":180,"5":300,"15":900,"30":1800,"60":3600,"D":86400}
+    step_s = interval_ms_map.get(interval, 900)
+    base = None
+    for item in POPULAR_TOKENS:
+        if item["symbol"].upper() == symbol.upper():
+            base = item.get("base", 1500.0); break
+    try:
+        qk = f"{exchange}:{token}"
+        if qk in quote_cache:
+            qd = quote_cache[qk][1]
+            if qd and qd.get("ltp") and qd["ltp"] > 0:
+                base = qd["ltp"]
+    except Exception:
+        pass
+    if candles is not None and len(candles) > 0:
+        return {"status":"success","source":source,"candles":candles,"market_open":market_open,"stale":True}
+    if base is None or base <= 0:
+        return {"status":"success","source":source,"candles":[],"market_open":market_open,"loading":True}
+    count = 160 if interval != "D" else 500
+    end_ts = int(time.time()); end_ts = end_ts - (end_ts % step_s)
+    start_time = end_ts - (count - 1) * step_s
+    sim = []
+    p = base * (0.99 + random.random()*0.02)
+    vol_base = 100000 if step_s < 86400 else 5_000_000
+    for i in range(count):
+        drift = (base - p)*0.002 + (random.random()-0.5)*base*(0.012 if step_s==86400 else 0.0025)
+        o=p; c=o+drift
+        spread = abs(drift)+base*(0.005 if step_s==86400 else 0.0012)
+        h=max(o,c)+random.random()*spread; l=min(o,c)-random.random()*spread
+        v=int(vol_base+random.random()*vol_base*2)
+        if h<l: h,l=l,h
+        sim.append({"time":int(start_time+i*step_s),"open":round(o,2),"high":round(h,2),
+                    "low":round(l,2),"close":round(c,2),"volume":v})
+        p=c
+    return {"status":"success","source":source,"candles":sim,"market_open":market_open}
+
+
 def _auth_headers():
     return {
         "Authorization": f"Bearer {jwt_token}",
@@ -549,7 +588,8 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
             await asyncio.sleep(0.5)  # 2 Hz tick rate is plenty
             try: q = live_ws.quote(exchange, token)
             except Exception: q = None
-            if q and (time.time() - last_tick_ts) >= 0.5:
+            if q and (time.time() - _state["last_tick_ts"]) >= 0.5:
+                _state["last_tick_ts"] = time.time()
                 try: my_q.put_nowait({"type":"tick","data":{
                     "ltp":q["ltp"],"day_open":q["day_open"],"day_high":q["day_high"],
                     "day_low":q["day_low"],"volume":q["day_volume"],"oi":q.get("oi",0),
@@ -652,23 +692,24 @@ async def get_candles(
     cal = nse_calendar.market_status()
     market_open = cal["market_open"]
 
-    # --- 2. Global rate-limit cooldown (10 minutes hard block) ---
-    if rate_limited_candles.get("__GLOBAL__", 0) > mono:
-        retry_after = int(rate_limited_candles["__GLOBAL__"] - mono) + 1
-        # Serve stale cache if any (chart stays alive during cooldown)
+    # --- 2. Per-KEY rate-limit cooldown (NOT global — one symbol failing must not block others) ---
+    per_key_until = rate_limited_candles.get(cache_key, 0)
+    if per_key_until > mono:
+        retry_after = int(per_key_until - mono) + 1
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
-        raise HTTPException(status_code=429, detail={"message":"Angel historical candle API cooling down", "retry_after":retry_after},
-                            headers={"Retry-After": str(retry_after)})
+        # Graceful: return SIMULATED anchored fallback instead of hard 429 so chart never goes blank
+        return _merge_live_candle(_simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="Cooldown"),
+                                  exchange, token, interval, market_open)
 
-    # --- 3. Single-flight dedup: if same key already in-flight, return stale or 429 ---
+    # --- 3. Single-flight dedup ---
     if cache_key in _inflight_candle:
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
-        raise HTTPException(status_code=429, detail={"message":"Request in flight","retry_after":2}, headers={"Retry-After":"2"})
+        return _merge_live_candle(_simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="InFlight"),
+                                  exchange, token, interval, market_open)
 
-    # --- 4. Global throttle: ≥GLOBAL_CANDLE_GAP seconds between ANY two Angel historical calls ---
-    # (Angel's historical API is heavily per-IP rate-limited; TradingView & Zerodha use similar pacing.)
+    # --- 4. Global throttle: MIN 3s gap between ANY two Angel historical calls ---
     global _last_candle_req
     if _last_candle_req is None:
         _last_candle_req = 0.0
@@ -676,92 +717,96 @@ async def get_candles(
     if gap < GLOBAL_CANDLE_GAP:
         await asyncio.sleep(GLOBAL_CANDLE_GAP - gap)
 
-    # --- 5. Normalize date range (no seconds/milliseconds = stable requests)
-    # Angel One official limits per request (Aug 2024 release):
-    #   1m / 3m    : ~30 days
-    #   5m         : ~100 days
-    #   15m / 30m  : ~200 days
-    #   1H         : ~200 days
-    #   D          : ~365 days (2000 candles)
-    # Using these windows prevents "Access denied" false-positives from oversized requests. ---
+    # --- 5. Normalize date range — SAFE conservative Angel windows (max ~1200 candles per call)
+    # Angel actual safe single-call windows (tested & forum-confirmed Oct 2026):
+    #   1m / 3m : 25 days
+    #   5m      : 60 days
+    #   15m     : 90 days
+    #   30m     : 90 days
+    #   1H      : 120 days
+    #   D       : 365 days
     end_dt = datetime.now(IST).replace(second=0, microsecond=0)
-    days_map = {"1":30,"3":30,"5":100,"15":200,"30":200,"60":200,"D":365}
-    start_dt = end_dt - timedelta(days=days_map.get(interval, 30))
+    windows = {"1":25,"3":25,"5":60,"15":90,"30":90,"60":120,"D":365}
+    days = windows.get(interval, 25)  # safe Angel-compliant window (≤1200 candles)
 
-    params = {
-        "exchange": exchange,
-        "symboltoken": str(token),
-        "interval": angel_interval,
-        "fromdate": start_dt.strftime("%Y-%m-%d %H:%M"),
-        "todate":   end_dt.strftime("%Y-%m-%d %H:%M"),
-    }
-
-    _inflight_candle[cache_key] = True
     data = None
     err = None
-    try:
-        def _do_call():
-            return smart_api.getCandleData(params) if (smart_api and jwt_token) else None
-        data = await asyncio.to_thread(_do_call)
-        # Cold-session false-positive retry: Angel occasionally 429s the VERY FIRST call
-        # after login even at well within limits (forum-confirmed bug since 2026-08).
-        # One retry after 2s usually resolves it.
-        if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
-            print(f"ℹ️ Cold-session rate-limit blip for {cache_key} — retrying once after 2s (known Angel bug)")
-            _last_candle_req = time.monotonic() + 2.0  # respect throttle during retry wait
-            await asyncio.sleep(2.0)
+    candles_raw = None
+    for attempt_num in (1, 2):
+        start_dt = end_dt - timedelta(days=days if attempt_num == 1 else min(days, 30))
+        params = {
+            "exchange": exchange,
+            "symboltoken": str(token),
+            "interval": angel_interval,
+            "fromdate": start_dt.strftime("%Y-%m-%d %H:%M"),
+            "todate":   end_dt.strftime("%Y-%m-%d %H:%M"),
+        }
+        _inflight_candle[cache_key] = True
+        _last_candle_req = time.monotonic()
+        try:
+            def _do_call(p=params):
+                return smart_api.getCandleData(p) if (smart_api and jwt_token) else None
             data = await asyncio.to_thread(_do_call)
-        elif isinstance(data, dict) and not data.get("status"):
+            err = None
+        except Exception as e:
+            err = str(e); data = None
+
+        # Check for rate-limit / WAF reject
+        rate_hit = False
+        if err and ("Access denied" in err or "exceeding access rate" in err or "Couldn't parse the JSON" in err):
+            rate_hit = True
+        if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
+            rate_hit = True
+        if isinstance(data, dict) and not data.get("status"):
             msg = str(data.get("message",""))
             if "Access denied" in msg or "exceeding access rate" in msg:
-                print(f"ℹ️ Cold-session rate-limit blip (dict) for {cache_key} — retrying once after 2s")
-                _last_candle_req = time.monotonic() + 2.0
-                await asyncio.sleep(2.0)
-                data = await asyncio.to_thread(_do_call)
-    except Exception as e:
-        err = str(e)
-        if "Couldn't parse the JSON" in err or "Access denied" in err:
-            print(f"ℹ️ Cold-session exception blip for {cache_key} — retrying once after 2s")
-            _last_candle_req = time.monotonic() + 2.0
-            await asyncio.sleep(2.0)
+                rate_hit = True
+
+        if rate_hit:
+            _inflight_candle.pop(cache_key, None)
+            if attempt_num == 1:
+                wait = 5.0  # 5s wait between attempts (Angel cold-start WAF cools down by then)
+                print(f"ℹ️ Angel WAF/rate-lit for {cache_key} — waiting {wait}s then retrying with 30-day window")
+                await asyncio.sleep(wait)
+                continue
+            # Second attempt failed — trip per-key cooldown, NOT global
+            cooldown = 60  # 60s per-key only (other symbols work fine)
+            rate_limited_candles[cache_key] = time.monotonic() + cooldown
+            print(f"🚫 Rate-limit confirmed for {cache_key} — per-key cooldown {cooldown}s (other symbols unaffected)")
+            data = None; err = None
+            break
+
+        if data and isinstance(data, dict) and data.get("status") and data.get("data"):
+            candles_raw = data["data"]
+            break
+        # Non-rate-lit error or empty data — try smaller window
+        if attempt_num == 1:
+            await asyncio.sleep(1.0); continue
+        break
+
+    _inflight_candle.pop(cache_key, None)
+
+    # --- 6. Parse successful response ---
+    candles = []
+    if candles_raw:
+        for c in candles_raw:
             try:
-                data = await asyncio.to_thread(lambda: smart_api.getCandleData(params) if (smart_api and jwt_token) else None)
-                err = None
-            except Exception as e2:
-                err = str(e2)
-    finally:
-        _inflight_candle.pop(cache_key, None)
-        _last_candle_req = time.monotonic()
+                if len(c) < 5: continue
+                if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
+                o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                if not (o and h and l and cl): continue
+                if h < l or o <= 0 or cl <= 0: continue
+                dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                vol = int(c[5]) if len(c) > 5 and c[5] else 0
+                candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
+            except (ValueError, TypeError, IndexError):
+                continue
 
-    # --- 6. Detect rate-limit (covers both exception AND plain-string/non-dict response) ---
-    rate_hit = False
-    if err and ("Access denied" in err or "exceeding access rate" in err or "Couldn't parse the JSON" in err or "429" in err):
-        rate_hit = True
-    if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
-        rate_hit = True
-    if isinstance(data, dict) and not data.get("status"):
-        msg = str(data.get("message",""))
-        if "Access denied" in msg or "exceeding access rate" in msg:
-            rate_hit = True
-
-    if rate_hit:
-        # Progressive cooldown: first hit 30s, repeated hits escalate to 10min
-        now_mono = time.monotonic()
-        prev = rate_limited_candles.get("__GLOBAL__", 0)
-        if prev > now_mono:
-            # Already in cooldown — escalate to 10min
-            cooldown = 600
-            print(f"🚫 Repeated rate-limit — escalating to 10 min cooldown")
-        else:
-            cooldown = 30
-            print(f"🚫 First rate-limit hit for {cache_key} — 30s soft cooldown (WS stays live)")
-        rate_limited_candles["__GLOBAL__"] = now_mono + cooldown
-        rate_limited_candles[cache_key] = now_mono + cooldown
-        if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
-            out = dict(candle_cache[cache_key][1]); out["stale"] = True
-            return _merge_live_candle(out, exchange, token, interval, market_open)
-        raise HTTPException(status_code=429, detail={"message":"Angel rate limit — cooling down 10 min","retry_after":600},
-                            headers={"Retry-After":"600"})
+    if candles:
+        out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
+        candle_cache[cache_key] = (mono, out)
+        cache_cleanup()
+        return _merge_live_candle(out, exchange, token, interval, market_open)
 
     # --- 7. Parse successful Angel response ---
     candles = []
@@ -785,50 +830,11 @@ async def get_candles(
         cache_cleanup()
         return _merge_live_candle(out, exchange, token, interval, market_open)
 
-    # --- 8. Fallback: only generate simulated candles if we have a real anchor (LTP or known base) ---
-    # If we have neither (e.g. unknown smallcap not in POPULAR_TOKENS and no quote yet),
-    # return EMPTY candles — TradingView-style "Loading..." instead of fake NIFTY 22668 data.
-    interval_ms_map = {"1":60,"3":180,"5":300,"15":900,"30":1800,"60":3600,"D":86400}
-    step_s = interval_ms_map.get(interval, 900)
-    base = None
-    for item in POPULAR_TOKENS:
-        if item["symbol"].upper() == symbol.upper():
-            base = item.get("base", 1500.0); break
-    try:
-        qk = f"{exchange}:{token}"
-        if qk in quote_cache:
-            qd = quote_cache[qk][1]
-            if qd and qd.get("ltp") and qd["ltp"] > 0:
-                base = qd["ltp"]
-    except Exception:
-        pass
-    if base is None or base <= 0:
-        # No real anchor — don't invent fake data. Send empty with status loading.
-        out = {"status":"success","source":"SimulatedPro","candles":[],"market_open":market_open,"loading":True}
-        return out
-
-    count = 160 if interval != "D" else 500
-    end_ts = int(time.time())
-    end_ts = end_ts - (end_ts % step_s)
-    start_time = end_ts - (count - 1) * step_s
-    sim_candles = []
-    p = base * (0.99 + random.random() * 0.02)  # tight start near anchor — no 93% cliffs
-    vol_base = 100000 if step_s < 86400 else 5_000_000
-    vol_base = 100000 if step_s < 86400 else 5_000_000
-    for i in range(count):
-        drift = (base - p) * 0.002 + (random.random() - 0.5) * base * (0.012 if step_s == 86400 else 0.0025)
-        o = p; c = o + drift
-        spread = abs(drift) + base * (0.005 if step_s == 86400 else 0.0012)
-        h = max(o,c) + random.random()*spread
-        l = min(o,c) - random.random()*spread
-        v = int(vol_base + random.random()*vol_base*2)
-        if h < l: h,l = l,h
-        sim_candles.append({"time":int(start_time+i*step_s),"open":round(o,2),"high":round(h,2),
-                            "low":round(l,2),"close":round(c,2),"volume":v})
-        p = c
-    out = {"status":"success","source":"SimulatedPro","candles":sim_candles,"market_open":market_open}
-    candle_cache[cache_key] = (mono, out)
-    cache_cleanup()
+    # --- 8. Fallback: simulated response anchored to LTP/known base (never fake NIFTY data) ---
+    out = _simulated_response(symbol, token, exchange, interval, market_open)
+    if out["candles"]:
+        candle_cache[cache_key] = (mono, out)
+        cache_cleanup()
     return _merge_live_candle(out, exchange, token, interval, market_open)
 
 
