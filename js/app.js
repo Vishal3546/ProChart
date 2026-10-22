@@ -13,6 +13,9 @@ class App {
         this.activeToken = localStorage.getItem('prochart_token') || '99926000';
         this.activeExchange = localStorage.getItem('prochart_exchange') || 'NSE';
         this.activeTimeframe = localStorage.getItem('prochart_tf') || '15';
+        this._pendingLoadTimer = null;   // debounce
+        this._pendingLoadAbort = null;   // AbortController
+        this._lastGoodPrice = {};        // symbol -> last known good close (fallback baseline)
 
         const defaultInds = ['EMA 20', 'EMA 50', 'VWAP', 'MACD', 'RSI 14'];
         try { this.activeIndicators = JSON.parse(localStorage.getItem('prochart_indicators')) || defaultInds; }
@@ -269,7 +272,15 @@ class App {
                 e.currentTarget.classList.add('active');
                 this.activeTimeframe = e.currentTarget.dataset.tf || '15';
                 localStorage.setItem('prochart_tf', this.activeTimeframe);
-                this.loadChartData(this.activeSymbol, this.activeTimeframe);
+                // Debounce + abort previous in-flight (prevents rate-limit spam on rapid clicks)
+                if (this._pendingLoadTimer) clearTimeout(this._pendingLoadTimer);
+                if (this._pendingLoadAbort) this._pendingLoadAbort.abort();
+                this._pendingLoadAbort = new AbortController();
+                const abortSig = this._pendingLoadAbort.signal;
+                this._pendingLoadTimer = setTimeout(() => {
+                    if (abortSig.aborted) return;
+                    this.loadChartData(this.activeSymbol, this.activeTimeframe);
+                }, 150);
             });
         });
     }
@@ -482,13 +493,39 @@ class App {
         // Resubscribe live WS to new token/timeframe
         this.connectLiveStream();
 
-        const meta = { token: this.activeToken, exchange: this.activeExchange };
-        const cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
-        const candles = cd.candles;
+        const meta = { token: this.activeToken, exchange: this.activeExchange,
+                       signal: this._pendingLoadAbort ? this._pendingLoadAbort.signal : null };
+        let cd;
+        try {
+            cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
+        } catch (e) {
+            if (e && e.name === 'AbortError') return;  // newer click superseded us
+            throw e;
+        }
+        let candles = cd.candles;
         const source = cd.source;
         if (typeof cd.market_open === 'boolean') this.marketOpen = cd.market_open;
         this.source = source;
         this.setConnectionStatus(source === 'AngelOne', source);
+
+        // ----- DATA SANITY: strip extreme outlier candles (>70% gap from previous)
+        // (only catches total garbage like NIFTY fallback bleeding into equity charts,
+        //  NOT real post-split / bonus moves which can be 30-50%) -----
+        if (candles && candles.length > 5) {
+            const sane = [candles[0]];
+            for (let i = 1; i < candles.length; i++) {
+                const c = candles[i], prev = sane[sane.length - 1];
+                const gap = Math.abs(c.close - prev.close) / prev.close;
+                if (gap > 0.7 && prev.close > 0) {
+                    sane.push({ ...c, open: prev.close, high: prev.close * 1.005, low: prev.close * 0.995, close: prev.close, volume: c.volume });
+                    console.warn(`Sanitized extreme outlier @ i=${i} (${c.close} vs prev ${prev.close})`);
+                } else {
+                    sane.push(c);
+                }
+            }
+            candles = sane;
+            this._lastGoodPrice[symbol] = candles[candles.length - 1].close;
+        }
 
         if (candles && candles.length > 0) {
             this.tvBridge.setCandleData(candles);
@@ -645,8 +682,9 @@ class App {
         } catch (e) {}
 
         // Trend Bias (VWAP + EMA20/50 + RSI composite score)
+        let tb = { label: '—', level: 'muted', bias: 'neutral', factors: {}, score: 0 };
         try {
-            const tb = this.trendBiasEngine.analyze(data);
+            tb = this.trendBiasEngine.analyze(data);
             const el = document.getElementById('trendBiasResult');
             if (el) {
                 el.textContent = tb.label;
@@ -992,5 +1030,6 @@ class App {
 
 window.addEventListener('load', () => {
     window.app = new App();
+    window._app = window.app;
     window.app.init();
 });

@@ -306,8 +306,8 @@ candle_cache = {}
 quote_cache = {}
 MAX_CACHE_SIZE = 50
 QUOTE_TTL = 3.0          # quote cache TTL (seconds) — prevents hammering every poll
-CANDLE_TTL = 10.0        # candle cache TTL (longer on market open prevents burst rate-limits)
-RATE_LIMIT_BACKOFF = 120 # after rate-limit, wait 2 minutes before retrying (AngelOne enforces per-minute limits)
+CANDLE_TTL = 20.0        # candle cache TTL (longer on market open prevents burst rate-limits)
+RATE_LIMIT_BACKOFF = 180 # after rate-limit, wait 3 minutes before retrying (AngelOne enforces per-minute limits)
 rate_limited_candles = {}
 rate_limited_quotes = {}
 

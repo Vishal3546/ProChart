@@ -29,18 +29,23 @@ class DataFeed {
             if (meta.exchange) params.set('exchange', meta.exchange);
 
             const url = `${this.baseUrl}/api/candles?${params.toString()}`;
-            const res = await fetch(url);
+            const fopt = { cache: 'no-store' };
+            if (meta.signal) fopt.signal = meta.signal;
+            const res = await fetch(url, fopt);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
 
             if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
                 return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
             }
-            // Fallback
-            return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
+            // Fallback: use last known LTP as base so we don't jump to NIFTY price
+            const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
+            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
         } catch (err) {
+            if (err.name === 'AbortError') { throw err; }
             console.warn('API candle fetch failed, using fallback generator:', err.message);
-            return { candles: this.generateFallbackCandles(timeframe), source: 'SimulatedPro' };
+            const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
+            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
         }
     }
 
@@ -96,7 +101,7 @@ class DataFeed {
                          c.high >= c.low && c.high > 0 && c.low > 0);
     }
 
-    generateFallbackCandles(tf = '15') {
+    generateFallbackCandles(tf = '15', anchorPrice = null) {
         const count = 180;
         const candles = [];
         const now = Math.floor(Date.now() / 1000);
@@ -104,7 +109,9 @@ class DataFeed {
         const step = tfSecMap[tf] || 900;
         const endTs = now - (now % step);
         const startTs = endTs - (count - 1) * step;
-        let basePrice = 22668.42;
+        // Use anchor price if known (e.g. last LTP from a prior good load),
+        // otherwise fall back to NIFTY default for the very first load.
+        let basePrice = (anchorPrice && anchorPrice > 0) ? anchorPrice : 22668.42;
 
         for (let i = 0; i < count; i++) {
             const drift = (Math.random() - 0.5) * basePrice * 0.002;
