@@ -81,7 +81,7 @@ POPULAR_TOKENS = [
     {"symbol": "SENSEX",    "name": "SENSEX INDEX",           "token": "99919000", "exchange": "BSE", "base": 74200.00},
     {"symbol": "RELIANCE",  "name": "RELIANCE INDUSTRIES",    "token": "2885",     "exchange": "NSE", "base": 2950.00},
     {"symbol": "HDFCBANK",  "name": "HDFC BANK LTD",          "token": "1333",     "exchange": "NSE", "base": 1450.25},
-    {"symbol": "TCS",       "name": "TATA CONSULTANCY",       "token": "11536",    "exchange": "NSE", "base": 3980.10},
+    {"symbol": "TCS",       "name": "TATA CONSULTANCY",       "token": "11536",    "exchange": "NSE", "base": 2508.00},
     {"symbol": "INFY",      "name": "INFOSYS LTD",            "token": "1594",     "exchange": "NSE", "base": 1520.45},
     {"symbol": "SBIN",      "name": "STATE BANK OF INDIA",    "token": "3045",     "exchange": "NSE", "base": 780.30},
     {"symbol": "TATASTEEL", "name": "TATA STEEL",             "token": "3499",     "exchange": "NSE", "base": 160.20},
@@ -306,8 +306,9 @@ candle_cache = {}
 quote_cache = {}
 MAX_CACHE_SIZE = 50
 QUOTE_TTL = 3.0          # quote cache TTL (seconds) — prevents hammering every poll
-CANDLE_TTL = 20.0        # candle cache TTL (longer on market open prevents burst rate-limits)
-RATE_LIMIT_BACKOFF = 180 # after rate-limit, wait 3 minutes before retrying (AngelOne enforces per-minute limits)
+CANDLE_TTL = 30.0        # candle cache TTL (longer TTL prevents burst rate-limits)
+RATE_LIMIT_BACKOFF = 180 # after rate-limit, wait 3 minutes before retrying
+_inflight_candle = {}    # per cache_key: ongoing Future — prevents duplicate parallel requests to Angel
 rate_limited_candles = {}
 rate_limited_quotes = {}
 
@@ -520,14 +521,53 @@ def get_candles(
     cal = nse_calendar.market_status()
     market_open = cal["market_open"]
 
+    # --- Sanity-validate cached entries (drop SimulatedPro whose anchor drifted) ---
+    if cache_key in candle_cache:
+        cached_time, cached_data = candle_cache[cache_key]
+        if cached_data and cached_data.get("source") == "SimulatedPro":
+            try:
+                candles = cached_data["candles"]
+                if candles:
+                    last_close = candles[-1]["close"]
+                    anchor = None
+                    # 1. Prefer live LTP (most accurate)
+                    qkey = f"{exchange}:{token}"
+                    if qkey in quote_cache:
+                        qd = quote_cache[qkey][1]
+                        if qd and qd.get("ltp") and qd["ltp"] > 0:
+                            anchor = qd["ltp"]
+                    # 2. Fall back to known static base
+                    if anchor is None:
+                        for item in POPULAR_TOKENS:
+                            if item["symbol"].upper() == symbol.upper():
+                                anchor = item.get("base"); break
+                    # Evict if simulated last close is >25% away from real anchor —
+                    # prevents chart showing fake 4000 bars then dropping to live 2500.
+                    if anchor and last_close and abs(last_close - anchor) / anchor > 0.25:
+                        del candle_cache[cache_key]
+                        cached_data = None
+                        print(f"♻️ Evicted stale SimulatedPro for {cache_key} (sim={last_close:.2f} vs anchor={anchor:.2f})")
+            except Exception:
+                pass
+
     # Serve cached data with TTL: longer TTL when market is closed or rate-limited
     if cache_key in candle_cache:
         cached_time, cached_data = candle_cache[cache_key]
         ttl = CANDLE_TTL if market_open else 999999  # after close, freeze forever
         if rate_limited_candles.get(cache_key, 0) > now_ts:
-            return cached_data  # during backoff always serve cache
+            return _merge_live_candle(cached_data, exchange, token, interval, market_open)
         if now_ts - cached_time < ttl:
-            return cached_data
+            return _merge_live_candle(cached_data, exchange, token, interval, market_open)
+
+    # --- Single-flight: if same key already being fetched, wait & use its result ---
+    import asyncio
+    loop = asyncio.get_event_loop() if asyncio._get_running_loop() else None
+    fut = _inflight_candle.get(cache_key)
+    if fut is not None:
+        try:
+            return fut.result() if fut.done() else cached_data or {"status":"pending"}
+        except Exception:
+            pass
 
     is_live = bool(smart_api and jwt_token)
     live_ok = False
@@ -619,6 +659,17 @@ def get_candles(
         if item["symbol"].upper() == symbol.upper():
             base = item.get("base", 1500.0)
             break
+    # Anchor fallback to live LTP if we've seen a recent quote for this token —
+    # avoids the "TCS showing 4000 instead of 2500" stale-base problem after splits/price moves.
+    try:
+        qkey = f"{exchange}:{token}"
+        if qkey in quote_cache:
+            qdata = quote_cache[qkey][1]
+            ltp = qdata.get("ltp")
+            if ltp and ltp > 0 and abs(ltp - base) / max(base, 1) < 0.9:
+                base = ltp
+    except Exception:
+        pass
 
     count = 160 if interval != "D" else 500  # daily needs 2yr bars = ~500 candles
     end_ts = int(now_ts)
@@ -736,13 +787,16 @@ if __name__ == "__main__":
     def _shutdown(*_a):
         if server.started and not server.should_exit:
             server.should_exit = True
-            # Force exit after 4s if graceful hang
+            # Force exit after 3s if graceful hang (fixes "Ctrl+C doesn't stop server")
             def _force_exit():
                 import time as _t
-                _t.sleep(4)
+                _t.sleep(3)
+                try: live_ws.stop()
+                except Exception: pass
                 os._exit(0)
             threading.Thread(target=_force_exit, daemon=True).start()
     signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _shutdown)
 
