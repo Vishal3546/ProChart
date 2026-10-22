@@ -631,9 +631,18 @@ async def get_candles(
             rate_hit = True
 
     if rate_hit:
-        rate_limited_candles["__GLOBAL__"] = time.monotonic() + 600  # 10 minutes
-        rate_limited_candles[cache_key] = time.monotonic() + 600
-        print(f"🚫 Candle RATE-LIMIT for {cache_key} — hard cooldown 10 min")
+        # Progressive cooldown: first hit 30s, repeated hits escalate to 10min
+        now_mono = time.monotonic()
+        prev = rate_limited_candles.get("__GLOBAL__", 0)
+        if prev > now_mono:
+            # Already in cooldown — escalate to 10min
+            cooldown = 600
+            print(f"🚫 Repeated rate-limit — escalating to 10 min cooldown")
+        else:
+            cooldown = 30
+            print(f"🚫 First rate-limit hit for {cache_key} — 30s soft cooldown (WS stays live)")
+        rate_limited_candles["__GLOBAL__"] = now_mono + cooldown
+        rate_limited_candles[cache_key] = now_mono + cooldown
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             out = dict(candle_cache[cache_key][1]); out["stale"] = True
             return _merge_live_candle(out, exchange, token, interval, market_open)

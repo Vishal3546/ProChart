@@ -16,6 +16,7 @@ class App {
         this._pendingLoadTimer = null;   // debounce
         this._pendingLoadAbort = null;   // AbortController
         this._lastGoodPrice = {};        // symbol -> last known good close (fallback baseline)
+        this._liveInitDone = false;      // don't fire candles until WS has had a moment
 
         const defaultInds = ['EMA 20', 'EMA 50', 'VWAP', 'MACD', 'RSI 14'];
         try { this.activeIndicators = JSON.parse(localStorage.getItem('prochart_indicators')) || defaultInds; }
@@ -79,6 +80,14 @@ class App {
             try { this.liveEventSource.close(); } catch (e) {}
             this.liveEventSource = null;
         }
+        // Skip duplicate subscribe if same token already being subscribed within 500ms
+        const targetKey = `${this.activeExchange}:${this.activeToken}:${this.activeTimeframe}`;
+        if (this._lastSubKey === targetKey && (Date.now() - (this._lastSubAt||0)) < 1500) {
+            return;
+        }
+        this._lastSubKey = targetKey;
+        this._lastSubAt = Date.now();
+
         // Kick off backend WS subscription to current token
         try {
             fetch('/api/ws/subscribe', {
@@ -131,6 +140,7 @@ class App {
         if (!t || !t.ltp) return;
         const prevClose = this.prevClose || t.prev_close || t.ltp;
         this.lastLtp = t.ltp;
+        this._lastWsTickAt = Date.now();
         this.updateHeaderPrice(t.ltp, t.ltp - prevClose);
         const spot = document.getElementById('greekSpot');
         if (spot) spot.value = t.ltp.toFixed(2);
@@ -889,7 +899,9 @@ class App {
                 const newBar = (nowSec - lastTs) >= stepSec;
 
                 let quote = null, moved = false;
-                if (this.isLiveConnected && this.marketOpen) {
+                // Only REST-poll quote if SSE/WS hasn't delivered a tick in last 5s (saves API calls)
+                const wsFresh = this.lastLtp && (Date.now() - (this._lastWsTickAt||0)) < 5000;
+                if (this.isLiveConnected && this.marketOpen && !wsFresh) {
                     quote = await this.dataFeed.fetchLiveQuote(this.activeSymbol, meta);
                 }
 
