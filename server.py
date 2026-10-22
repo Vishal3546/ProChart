@@ -726,14 +726,14 @@ async def get_candles(
     #   1H      : 120 days
     #   D       : 365 days
     end_dt = datetime.now(IST).replace(second=0, microsecond=0)
-    windows = {"1":25,"3":25,"5":60,"15":90,"30":90,"60":120,"D":365}
-    days = windows.get(interval, 25)  # safe Angel-compliant window (≤1200 candles)
+    windows = {"1":20,"3":25,"5":60,"15":90,"30":90,"60":120,"D":365}
+    days = windows.get(interval, 25)  # safe Angel-compliant window (max ~5200 candles — well under 8000 limit)
 
     data = None
     err = None
     candles_raw = None
     for attempt_num in (1, 2):
-        start_dt = end_dt - timedelta(days=days if attempt_num == 1 else min(days, 30))
+        start_dt = end_dt - timedelta(days=days if attempt_num == 1 else min(days, 15))
         params = {
             "exchange": exchange,
             "symboltoken": str(token),
