@@ -99,39 +99,43 @@ class App {
 
     // --------------- LIVE WS (SSE) ---------------
     connectLiveStream() {
-        // CLOSE ALL previous EventSources (not just the active one) — TF switches
-        // create new SSE with different interval param but old ones must die.
+        const symKey = `${this.activeExchange}:${this.activeToken}`;
+        const fullKey = `${symKey}:${this.activeTimeframe}`;
+
+        // Skip ENTIRELY if already subscribed to same (token+TF) — idempotent fast path
+        if (this._lastSubKey === fullKey && this.liveEventSource && this.liveEventSource.readyState === 1 && (Date.now()-(this._lastSubAt||0)) < 30000) {
+            return;
+        }
+
+        // Always close old SSE first
         if (this.liveEventSource) {
             try { this.liveEventSource.close(); } catch (e) {}
             this.liveEventSource = null;
         }
-        // Force server to drop ALL stale SSE for this token (every interval)
-        try {
-            fetch('/api/ws/unsubscribe', { method:'POST', cache:'no-store' }).catch(()=>{});
-        } catch(e){}
-        // Skip duplicate subscribe if same token already being subscribed within 500ms
-        const targetKey = `${this.activeExchange}:${this.activeToken}:${this.activeTimeframe}`;
-        if (this._lastSubKey === targetKey && (Date.now() - (this._lastSubAt||0)) < 1500) {
-            return;
-        }
-        this._lastSubKey = targetKey;
+        // Tell server to drop stale SSEs for this token
+        try { fetch('/api/ws/unsubscribe', { method:'POST', cache:'no-store' }).catch(()=>{}); } catch(e){}
+
+        // Only do a backend /api/ws/subscribe POST if the TOKEN changed (same symbol = same WS tick).
+        // Pure TF switch doesn't need new WS subscribe — just new SSE interval bucket.
+        const tokenChanged = (this._lastSubSymKey !== symKey);
+        this._lastSubKey = fullKey;
+        this._lastSubSymKey = symKey;
         this._lastSubAt = Date.now();
 
-        // Kick off backend WS subscription to current token
-        try {
-            fetch('/api/ws/subscribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ exchange: this.activeExchange, token: this.activeToken }),
-                cache: 'no-store',
-            }).then(r => r.json()).then(j => {
-                if (j.status && j.ws && j.ws.connected) {
-                    console.log(`🔌 Live WS subscribed: ${this.activeExchange}:${this.activeToken} (${j.ws.subscribed_count} token(s))`);
-                } else {
-                    console.warn('⚠️ Live WS subscribe:', j.message || 'no feed token yet — falling back to polling');
-                }
-            }).catch(() => {});
-        } catch (e) {}
+        if (tokenChanged) {
+            try {
+                fetch('/api/ws/subscribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ exchange: this.activeExchange, token: this.activeToken }),
+                    cache: 'no-store',
+                }).then(r => r.json()).then(j => {
+                    if (j.status && j.ws && j.ws.connected) {
+                        console.log(`🔌 Live WS subscribed: ${symKey} (${j.ws.subscribed_count} token(s))`);
+                    }
+                }).catch(() => {});
+            } catch (e) {}
+        }
 
         const url = `/api/ticks/stream?exchange=${encodeURIComponent(this.activeExchange)}&token=${encodeURIComponent(this.activeToken)}&interval=${encodeURIComponent(this.activeTimeframe)}`;
         try {
@@ -309,11 +313,13 @@ class App {
 
         document.querySelectorAll('.tf-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
+                const tf = e.currentTarget.dataset.tf || '15';
+                if (tf === this.activeTimeframe) return;  // already on that TF — nothing to do
                 document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
                 e.currentTarget.classList.add('active');
-                this.activeTimeframe = e.currentTarget.dataset.tf || '15';
+                this.activeTimeframe = tf;
                 localStorage.setItem('prochart_tf', this.activeTimeframe);
-                // Debounce + abort previous in-flight (prevents rate-limit spam on rapid clicks)
+                // Debounce 200ms (TradingView-style snappy feel) + abort previous fetch
                 if (this._pendingLoadTimer) clearTimeout(this._pendingLoadTimer);
                 if (this._pendingLoadAbort) this._pendingLoadAbort.abort();
                 this._pendingLoadAbort = new AbortController();
@@ -321,7 +327,7 @@ class App {
                 this._pendingLoadTimer = setTimeout(() => {
                     if (abortSig.aborted) return;
                     this.loadChartData(this.activeSymbol, this.activeTimeframe);
-                }, 700);  // 700ms debounce — last click only
+                }, 200);
             });
         });
     }
@@ -527,14 +533,43 @@ class App {
         const isRetry = !!opts.retry;
         const isFirstLoad = !!opts.firstLoad;
         this.activeSymbol = symbol;
+        this.activeTimeframe = tf;
         localStorage.setItem('prochart_symbol', symbol);
+        localStorage.setItem('prochart_tf', tf);
 
         const label = tf === 'D' ? 'D' : `${tf}m`;
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
-        // Connect WS only on first load / symbol change / TF change (NOT on retry or auto-reload)
-        if (!isRetry) this.connectLiveStream();
+        // ----- INSTANT CHART: TradingView-style — render localStorage cache FIRST (if exists & fresh),
+        // then silently refresh from Angel in background. This gives sub-100ms TF switch UX.
+        const instantCache = this.dataFeed._loadLocalCache(symbol, tf);
+        const hadInstant = !!(instantCache && instantCache.length);
+        if (hadInstant) {
+            const saneInst = this._sanitizeCandles(instantCache, symbol);
+            this._lastGoodPrice[symbol] = saneInst[saneInst.length - 1].close;
+            this.tvBridge.setCandleData(saneInst);
+            requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(saneInst); });
+            const last = saneInst[saneInst.length - 1];
+            this.lastLtp = last.close;
+            this.prevClose = this._findDayOpen(saneInst, tf);
+            this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
+            this.setConnectionStatus(false, 'Cached');
+            const sp = document.getElementById('greekSpot'); if (sp) sp.value = last.close.toFixed(2);
+        } else if (!isRetry) {
+            // No cache — show subtle "loading" pill on chart pane but don't blank the chart
+            // (keep previous symbol's chart visible for a moment for visual continuity)
+            const el = document.getElementById('trendBiasResult');
+            if (el) { el.textContent = '⏳ Loading...'; el.className = 'bias-badge bias-neutral'; }
+        }
+
+        // WS subscription: only change when SYMBOL changes; pure TF switch keeps same WS tick stream
+        // (just needs a new SSE interval bucket for forming candles). Skip on retries entirely.
+        if (!isRetry) {
+            // Abort any prior in-flight candle fetch for other TFs (prevents stale responses overwriting new TF)
+            this.dataFeed && this.dataFeed.abortAllCandles && this.dataFeed.abortAllCandles();
+            this.connectLiveStream();
+        }
 
         const meta = { token: this.activeToken, exchange: this.activeExchange,
                        signal: this._pendingLoadAbort ? this._pendingLoadAbort.signal : null };
@@ -543,7 +578,7 @@ class App {
             cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
         } catch (e) {
             if (e && e.name === 'AbortError') return;  // newer click superseded us
-            throw e;
+            return;  // silent — instant cache already showed if available
         }
         let candles = cd.candles;
         const source = cd.source;
@@ -551,36 +586,19 @@ class App {
         this.source = source;
         this.setConnectionStatus(source === 'AngelOne', source);
 
-        // ----- DATA SANITY: strip extreme outlier candles (>70% gap from previous)
-        // (only catches total garbage like NIFTY fallback bleeding into equity charts,
-        //  NOT real post-split / bonus moves which can be 30-50%) -----
-        if (candles && candles.length > 5) {
-            const sane = [candles[0]];
-            for (let i = 1; i < candles.length; i++) {
-                const c = candles[i], prev = sane[sane.length - 1];
-                const gap = Math.abs(c.close - prev.close) / prev.close;
-                if (gap > 0.7 && prev.close > 0) {
-                    sane.push({ ...c, open: prev.close, high: prev.close * 1.005, low: prev.close * 0.995, close: prev.close, volume: c.volume });
-                    console.warn(`Sanitized extreme outlier @ i=${i} (${c.close} vs prev ${prev.close})`);
-                } else {
-                    sane.push(c);
-                }
-            }
-            candles = sane;
-            this._lastGoodPrice[symbol] = candles[candles.length - 1].close;
-        }
+        candles = this._sanitizeCandles(candles, symbol);
 
         if (cd && cd.loading && (!candles || candles.length === 0)) {
-            // No data and still loading — show "Loading..." and retry (exponential backoff, no WS resubscribe)
+            // No data yet — exponential backoff retry, no WS resubscribe
             const el = document.getElementById('trendBiasResult');
             if (el) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
             clearTimeout(this._retryLoadTimer);
             this._retryCount = (this._retryCount || 0) + 1;
-            const waitMs = Math.min(3000 * this._retryCount, 15000);
+            const waitMs = Math.min(2000 * this._retryCount, 10000);
             this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf, { retry: true }), waitMs);
             return;
         }
-        this._retryCount = 0;  // success reset
+        this._retryCount = 0;
         if (candles && candles.length > 0) {
             this.tvBridge.setCandleData(candles);
             requestAnimationFrame(() => {
@@ -588,29 +606,42 @@ class App {
                 this.runAllAnalytics(candles);
             });
             const last = candles[candles.length - 1];
-            // Find TODAY'S opening candle for correct %change baseline:
-            // For intraday TFs (<=60min) — find the first bar whose time is >= today 09:15 IST.
-            // For daily TF — use the PREVIOUS day's close (first candle's open = start of dataset).
-            let dayOpen = candles[0].open;
-            if (this.activeTimeframe !== 'D') {
-                const now = new Date();
-                const istOffset = 5.5 * 3600 * 1000;
-                const istNow = new Date(now.getTime() + istOffset);
-                const istY = istNow.getUTCFullYear(), istM = istNow.getUTCMonth(), istD = istNow.getUTCDate();
-                const dayStart = Date.UTC(istY, istM, istD, 3, 45, 0); // 09:15 IST = 03:45 UTC
-                for (let i = 0; i < candles.length; i++) {
-                    if (candles[i].time * 1000 >= dayStart) { dayOpen = candles[i].open; break; }
-                }
-            } else {
-                // Daily: previous day close as baseline
-                dayOpen = candles.length > 1 ? candles[candles.length - 2].close : candles[0].open;
-            }
-            this.prevClose = dayOpen;
+            this.prevClose = this._findDayOpen(candles, tf);
             this.lastLtp = last.close;
-            const spot = document.getElementById('greekSpot'); if (spot && this.lastLtp) spot.value = this.lastLtp.toFixed(2);
+            const sp = document.getElementById('greekSpot'); if (sp && this.lastLtp) sp.value = this.lastLtp.toFixed(2);
             this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
             const btn = document.getElementById('greekCalcBtn'); if (btn) btn.click();
         }
+    }
+
+    /** Strip extreme outlier candles (>70% gap) — prevents NIFTY fallback / corrupted data */
+    _sanitizeCandles(candles, symbol) {
+        if (!candles || candles.length <= 5) return candles || [];
+        const sane = [candles[0]];
+        for (let i = 1; i < candles.length; i++) {
+            const c = candles[i], prev = sane[sane.length - 1];
+            const gap = Math.abs(c.close - prev.close) / prev.close;
+            if (gap > 0.7 && prev.close > 0) {
+                sane.push({ ...c, open: prev.close, high: prev.close*1.005, low: prev.close*0.995, close: prev.close, volume: c.volume });
+            } else { sane.push(c); }
+        }
+        if (symbol) this._lastGoodPrice[symbol] = sane[sane.length-1].close;
+        return sane;
+    }
+
+    /** Find today's day-open from a candle array (first bar >= 09:15 IST intraday, prev-day close for D) */
+    _findDayOpen(candles, tf) {
+        if (!candles || !candles.length) return candles?.[0]?.open || 0;
+        if (tf === 'D') return candles.length > 1 ? candles[candles.length-2].close : candles[0].open;
+        const now = new Date();
+        const istOffset = 5.5*3600*1000;
+        const istNow = new Date(now.getTime()+istOffset);
+        const istY = istNow.getUTCFullYear(), istM = istNow.getUTCMonth(), istD = istNow.getUTCDate();
+        const dayStart = Date.UTC(istY, istM, istD, 3, 45, 0);
+        for (let i=0; i<candles.length; i++) {
+            if (candles[i].time*1000 >= dayStart) return candles[i].open;
+        }
+        return candles[0].open;
     }
 
     applyIndicators() {

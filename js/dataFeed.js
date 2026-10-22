@@ -13,9 +13,21 @@ class DataFeed {
         }
         this._candleInFlight = new Map();  // per-key: Promise (single-flight)
         this._candleCooldownUntil = 0;     // ms timestamp
+        this._candleAbort = new Map();     // per-key AbortController to cancel stale fetches on TF switch
         this._quoteInFlight = null;        // Promise dedupe
         this._lastQuoteKey = null;
         this._lastQuoteAt = 0;
+    }
+
+    /** Cancel any in-flight candle fetch for a specific key (called on TF/symbol switch) */
+    abortCandle(key) {
+        const ctrl = this._candleAbort.get(key);
+        if (ctrl) { try { ctrl.abort(); } catch(_){} this._candleAbort.delete(key); }
+    }
+    /** Cancel ALL in-flight candle fetches (called on page nav/unload) */
+    abortAllCandles() {
+        for (const ctrl of this._candleAbort.values()) { try { ctrl.abort(); } catch(_){} }
+        this._candleAbort.clear();
     }
 
     async fetchCandles(symbol, tf, meta = {}) {
@@ -39,23 +51,27 @@ class DataFeed {
         if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
 
         const p = (async () => {
+            // Create our own AbortController for this request so we can cancel stale fetches
+            // on TF/symbol switch (TradingView-style instant cancellation)
+            const ctrl = new AbortController();
+            this._candleAbort.set(cKey, ctrl);
             try {
                 const params = new URLSearchParams({ symbol: symbol || 'NIFTY', interval: timeframe });
                 if (meta.token) params.set('token', meta.token);
                 if (meta.exchange) params.set('exchange', meta.exchange);
                 const url = `${this.baseUrl}/api/candles?${params.toString()}`;
-                const fopt = { cache: 'no-store' };
-                if (meta.signal) fopt.signal = meta.signal;
+                const fopt = { cache: 'no-store', signal: ctrl.signal };
                 const res = await fetch(url, fopt);
                 if (res.status === 429) {
-                    let retry = 60;
-                    try { const j = await res.json(); retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 60; } catch(_){}
+                    let retry = 30;
+                    try { const j = await res.json(); retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 30; } catch(_){}
                     this._candleCooldownUntil = Date.now() + retry * 1000;
                     console.warn(`Candle 429 — cooling down ${retry}s for ${cKey}`);
-                    // Return localStorage cache if present (TradingView-style)
                     const cached = this._loadLocalCache(symbol, timeframe);
                     if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
-                    throw new Error(`Rate limited (${retry}s)`);
+                    // Graceful fallback instead of throwing
+                    const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
+                    return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', cooldown: true };
                 }
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
@@ -64,17 +80,18 @@ class DataFeed {
                     if (data.source === 'AngelOne') this._saveLocalCache(symbol, timeframe, candles);
                     return { candles, source: data.source || 'unknown' };
                 }
-                // Server sent empty/loading — try local cache
                 const cached = this._loadLocalCache(symbol, timeframe);
                 if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
-                throw new Error('Empty response');
+                const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
+                return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', loading: data && data.loading };
             } catch (err) {
-                if (err && err.name === 'AbortError') throw err;
+                if (err && err.name === 'AbortError') { throw err; }  // caller handles abort
                 console.warn('API candle fetch failed, using fallback:', err.message);
                 const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
                 return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
             } finally {
                 this._candleInFlight.delete(cKey);
+                this._candleAbort.delete(cKey);
             }
         })();
         this._candleInFlight.set(cKey, p);
