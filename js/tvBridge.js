@@ -242,13 +242,29 @@ class TVBridge {
 
     // ---------- data ----------
     setCandleData(data) {
-        if (!this.series.main || !data || !data.length) return;
-        this.currentData = data.slice().sort((a, b) => this._toSec(a.time) - this._toSec(b.time));
+        if (!this.series || !this.series.main) return;  // chart not initialized yet
+        if (!data || !data.length) return;
+        // Defensive: drop null/NaN/duplicate-timestamp candles that cause LW "Cannot read properties of null (reading 'from')"
+        const seen = new Set();
+        const clean = [];
+        for (const d of data) {
+            if (!d) continue;
+            const t = this._toSec(d.time);
+            if (t <= 0) continue;
+            const o=+d.open, h=+d.high, l=+d.low, c=+d.close;
+            if (!isFinite(o)||!isFinite(h)||!isFinite(l)||!isFinite(c)) continue;
+            if (h < l || o <= 0 || c <= 0) continue;
+            if (seen.has(t)) continue;  // duplicate time — LW hates that
+            seen.add(t);
+            clean.push({time:t, open:o, high:h, low:l, close:c, volume:d.volume});
+        }
+        if (clean.length < 2) return;
+        this.currentData = clean.sort((a, b) => a.time - b.time);
         const fmt = this._fmt(this.currentData);
         const vFmt = this._fmtVol(this.currentData);
-        this.series.main.setData(fmt);
-        this.series.vol.setData(vFmt);
-        // TRADINGVIEW-STYLE DEFAULT ZOOM: show last ~80 bars (not all data)
+        if (!fmt.length || !vFmt.length) return;
+        try { this.series.main.setData(fmt); } catch(e){ console.warn('main.setData failed', e.message); }
+        try { this.series.vol.setData(vFmt); } catch(e){ console.warn('vol.setData failed', e.message); }
         this._anchorToLatest(fmt.length);
     }
 

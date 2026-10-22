@@ -645,6 +645,7 @@ class App {
     }
 
     applyIndicators() {
+        if (!this.tvBridge || !this.tvBridge.currentData || this.tvBridge.currentData.length < 5) return;
         this.tvBridge.clearIndicators();
         // Clear & re-add selected overlays
         this.activeIndicators.forEach(ind => {
