@@ -99,10 +99,16 @@ class App {
 
     // --------------- LIVE WS (SSE) ---------------
     connectLiveStream() {
+        // CLOSE ALL previous EventSources (not just the active one) — TF switches
+        // create new SSE with different interval param but old ones must die.
         if (this.liveEventSource) {
             try { this.liveEventSource.close(); } catch (e) {}
             this.liveEventSource = null;
         }
+        // Force server to drop ALL stale SSE for this token (every interval)
+        try {
+            fetch('/api/ws/unsubscribe', { method:'POST', cache:'no-store' }).catch(()=>{});
+        } catch(e){}
         // Skip duplicate subscribe if same token already being subscribed within 500ms
         const targetKey = `${this.activeExchange}:${this.activeToken}:${this.activeTimeframe}`;
         if (this._lastSubKey === targetKey && (Date.now() - (this._lastSubAt||0)) < 1500) {
@@ -517,7 +523,8 @@ class App {
         }
     }
 
-    async loadChartData(symbol, tf) {
+    async loadChartData(symbol, tf, opts = {}) {
+        const isRetry = !!opts.retry;
         this.activeSymbol = symbol;
         localStorage.setItem('prochart_symbol', symbol);
 
@@ -525,8 +532,8 @@ class App {
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
-        // Resubscribe live WS to new token/timeframe
-        this.connectLiveStream();
+        // Only (re)subscribe WS on initial load / symbol change / TF change (NOT on 429 retry)
+        if (!isRetry) this.connectLiveStream();
 
         const meta = { token: this.activeToken, exchange: this.activeExchange,
                        signal: this._pendingLoadAbort ? this._pendingLoadAbort.signal : null };
@@ -563,13 +570,16 @@ class App {
         }
 
         if (cd && cd.loading && (!candles || candles.length === 0)) {
-            // No real data available yet — show "Loading..." and retry in 5s
+            // No data and still loading — show "Loading..." and retry (exponential backoff, no WS resubscribe)
             const el = document.getElementById('trendBiasResult');
             if (el) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
             clearTimeout(this._retryLoadTimer);
-            this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf), 5000);
+            this._retryCount = (this._retryCount || 0) + 1;
+            const waitMs = Math.min(3000 * this._retryCount, 15000);
+            this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf, { retry: true }), waitMs);
             return;
         }
+        this._retryCount = 0;  // success reset
         if (candles && candles.length > 0) {
             this.tvBridge.setCandleData(candles);
             requestAnimationFrame(() => {

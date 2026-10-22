@@ -447,6 +447,22 @@ async def ws_subscribe(req: Request):
     return {"status": True, "ws": live_ws.status()}
 
 
+@app.post("/api/ws/unsubscribe")
+async def ws_unsubscribe(req: Request):
+    """Kill all active SSE streams (used on connectLiveStream before reconnect to prevent flood)."""
+    # Drop ALL SSE streams — fresh page/TF is about to open a new one.
+    killed = 0
+    for k in list(_active_sse.keys()):
+        prev = _active_sse.pop(k, None)
+        if prev:
+            try: prev[1].set_result(True)
+            except Exception: pass
+            killed += 1
+    if killed:
+        print(f"♻️ Client unsubscribe: killed {killed} active SSE streams")
+    return {"status": True, "killed": killed}
+
+
 @app.get("/api/ws/status")
 def ws_status():
     return live_ws.status()
@@ -470,18 +486,16 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
     token = str(token or "").strip()
     sse_key = f"{exchange}:{token}:{interval}"
 
-    # --- Hard cap on concurrent SSE per (exchange,token) ---
-    # Prevent quote flooding from stale tabs / F5 refreshes that don't disconnect cleanly.
-    same_token_count = sum(1 for k in _active_sse if k.startswith(f"{exchange}:{token}:"))
-    if same_token_count >= MAX_CONCURRENT_SSE:
-        # Drop the oldest (stale) connection(s) for this token
-        to_drop = [k for k in _active_sse if k.startswith(f"{exchange}:{token}:")][:same_token_count - MAX_CONCURRENT_SSE + 1]
-        for k in to_drop:
-            prev = _active_sse.pop(k, None)
-            if prev:
-                try: prev[1].set_result(True)
-                except Exception: pass
-        print(f"♻️ Dropped {len(to_drop)} stale SSE connections for {exchange}:{token} (max {MAX_CONCURRENT_SSE})")
+    # --- Single SSE per token: drop ALL stale SSE (from old TFs / tabs / refreshes) ---
+    # One chart = one token = one SSE. Old interval SSEs cause quote floods.
+    stale = [k for k in list(_active_sse.keys()) if k.startswith(f"{exchange}:{token}:")]
+    for k in stale:
+        prev = _active_sse.pop(k, None)
+        if prev:
+            try: prev[1].set_result(True)
+            except Exception: pass
+    if stale:
+        print(f"♻️ Dropped {len(stale)} stale SSE for {exchange}:{token} (TF switch / refresh; only {interval} kept)")
 
     import asyncio
     my_q = asyncio.Queue(maxsize=50)

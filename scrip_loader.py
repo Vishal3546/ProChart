@@ -130,7 +130,7 @@ def _build_index(raw):
             continue
 
     out.sort(key=lambda r: (
-        0 if r["type"] == "INDEX" else 1 if r["type"] == "EQ" else 2,
+        0 if r["type"] == "EQ" else 1 if r["type"] == "INDEX" else 2,
         r["symKey"],
     ))
     return out
@@ -289,7 +289,7 @@ def search(q, limit=20):
                 rank -= 0.1
             if rank < 99:
                 matches.append((rank, s))
-    matches.sort(key=lambda x: (x[0], 0 if x[1]["type"] == "INDEX" else 1 if x[1]["type"] == "EQ" else 2, x[1]["symKey"]))
+    matches.sort(key=lambda x: (x[0], 0 if x[1]["type"] == "EQ" else 1 if x[1]["type"] == "INDEX" else 2, x[1]["symKey"]))
     out = []
     for _, s in matches[:limit]:
         out.append({
