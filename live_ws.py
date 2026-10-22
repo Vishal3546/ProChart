@@ -187,13 +187,15 @@ class LiveTickClient:
             self._subscribed.clear()
 
     def subscribe_only(self, exchange: str, token: str):
-        """Unsubscribe everything else and subscribe just this one (used on symbol change)."""
+        """Subscribe to just this token; no-op if already the only active sub (prevents duplicate WS traffic)."""
         with self._lock:
+            key = self._tok_key(ex_type(exchange), token)
+            if len(self._subscribed) == 1 and key in self._subscribed:
+                return  # already subscribed to exactly this one — skip (saves WS roundtrip)
             was_connected = self._connected
             self.unsubscribe_all()
             if was_connected:
-                # Small delay then subscribe new token
-                time.sleep(0.1)
+                time.sleep(0.05)
             self.subscribe(exchange, token)
 
     # ---------- public read (for REST / status / SSE) ----------

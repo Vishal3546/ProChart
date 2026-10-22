@@ -6,13 +6,16 @@
  * ============================================================ */
 class DataFeed {
     constructor() {
-        // When served from FastAPI, use relative URLs (works through reverse proxies too).
-        // When opened from file:// (double-clicked), fall back to localhost.
         if (window.location.protocol === 'file:') {
             this.baseUrl = 'http://127.0.0.1:8000';
         } else {
-            this.baseUrl = '';  // same origin
+            this.baseUrl = '';
         }
+        this._candleInFlight = new Map();  // per-key: Promise (single-flight)
+        this._candleCooldownUntil = 0;     // ms timestamp
+        this._quoteInFlight = null;        // Promise dedupe
+        this._lastQuoteKey = null;
+        this._lastQuoteAt = 0;
     }
 
     async fetchCandles(symbol, tf, meta = {}) {
@@ -20,47 +23,80 @@ class DataFeed {
     }
 
     async fetchCandleData(symbol = 'NIFTY', timeframe = '15', meta = {}) {
-        try {
-            const params = new URLSearchParams({
-                symbol: symbol || 'NIFTY',
-                interval: timeframe,
-            });
-            if (meta.token)    params.set('token', meta.token);
-            if (meta.exchange) params.set('exchange', meta.exchange);
+        const token = meta.token || '';
+        const exchange = meta.exchange || 'NSE';
+        const cKey = `${exchange}:${token}:${timeframe}`;
 
-            const url = `${this.baseUrl}/api/candles?${params.toString()}`;
-            const fopt = { cache: 'no-store' };
-            if (meta.signal) fopt.signal = meta.signal;
-            const res = await fetch(url, fopt);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-
-            if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
-                return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
-            }
-            // Fallback: use last known LTP as base so we don't jump to NIFTY price
+        // --- Global client-side cooldown (don't hammer if server said 429) ---
+        const now = Date.now();
+        if (now < this._candleCooldownUntil) {
+            // Return in-flight promise if exists
+            if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
             const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
-        } catch (err) {
-            if (err.name === 'AbortError') { throw err; }
-            console.warn('API candle fetch failed, using fallback generator:', err.message);
-            const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
+            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', cooldown: true };
         }
+
+        // --- Single-flight: if same key already fetching, reuse promise ---
+        if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
+
+        const p = (async () => {
+            try {
+                const params = new URLSearchParams({ symbol: symbol || 'NIFTY', interval: timeframe });
+                if (meta.token) params.set('token', meta.token);
+                if (meta.exchange) params.set('exchange', meta.exchange);
+                const url = `${this.baseUrl}/api/candles?${params.toString()}`;
+                const fopt = { cache: 'no-store' };
+                if (meta.signal) fopt.signal = meta.signal;
+                const res = await fetch(url, fopt);
+                if (res.status === 429) {
+                    let retry = 60;
+                    try { const j = await res.json(); retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 60; } catch(_){}
+                    this._candleCooldownUntil = Date.now() + retry * 1000;
+                    console.warn(`Candle 429 — cooling down ${retry}s for ${cKey}`);
+                    throw new Error(`Rate limited (${retry}s)`);
+                }
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
+                    return { candles: this.formatCandles(data.candles), source: data.source || 'unknown' };
+                }
+                throw new Error('Empty response');
+            } catch (err) {
+                if (err && err.name === 'AbortError') throw err;
+                console.warn('API candle fetch failed, using fallback:', err.message);
+                const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
+                return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
+            } finally {
+                this._candleInFlight.delete(cKey);
+            }
+        })();
+        this._candleInFlight.set(cKey, p);
+        return p;
     }
 
     async fetchLiveQuote(symbol = 'NIFTY', meta = {}) {
-        try {
-            const params = new URLSearchParams({ symbol });
-            if (meta.token)    params.set('token', meta.token);
-            if (meta.exchange) params.set('exchange', meta.exchange);
-            const url = `${this.baseUrl}/api/quote?${params.toString()}`;
-            const res = await fetch(url);
-            if (!res.ok) return null;
-            return await res.json();
-        } catch (err) {
-            return null;
+        const token = meta.token || '';
+        const exchange = meta.exchange || 'NSE';
+        const key = `${exchange}:${token}`;
+        const now = Date.now();
+        // Dedupe: same quote within 2s → return in-flight / skip
+        if (key === this._lastQuoteKey && now - this._lastQuoteAt < 2000 && this._quoteInFlight) {
+            return this._quoteInFlight;
         }
+        this._lastQuoteKey = key;
+        this._lastQuoteAt = now;
+        this._quoteInFlight = (async () => {
+            try {
+                const params = new URLSearchParams({ symbol });
+                if (meta.token)    params.set('token', meta.token);
+                if (meta.exchange) params.set('exchange', meta.exchange);
+                const url = `${this.baseUrl}/api/quote?${params.toString()}`;
+                const res = await fetch(url, { cache: 'no-store' });
+                if (!res.ok) return null;
+                return await res.json();
+            } catch (err) { return null; }
+        })();
+        return this._quoteInFlight;
     }
 
     async fetchStatus() {

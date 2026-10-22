@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 import pyotp
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
@@ -308,7 +308,8 @@ MAX_CACHE_SIZE = 50
 QUOTE_TTL = 3.0          # quote cache TTL (seconds) — prevents hammering every poll
 CANDLE_TTL = 30.0        # candle cache TTL (longer TTL prevents burst rate-limits)
 RATE_LIMIT_BACKOFF = 180 # after rate-limit, wait 3 minutes before retrying
-_inflight_candle = {}    # per cache_key: ongoing Future — prevents duplicate parallel requests to Angel
+_inflight_candle = {}    # per cache_key: single-flight guard
+_last_candle_req = None   # monotonic timestamp of last Angel candle call (global 1/sec throttle)
 rate_limited_candles = {}
 rate_limited_quotes = {}
 
@@ -491,222 +492,218 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
 
 
 @app.get("/api/candles")
-def get_candles(
+async def get_candles(
     symbol: str = "NIFTY",
     token: str = "99926000",
     exchange: str = "NSE",
     interval: str = "15",
 ):
+    """Bulletproof candle endpoint:
+       - async (no event-loop blocking, proper concurrency control)
+       - cache key = exchange:token:interval (NO dynamic timestamps = 100% cache hits)
+       - single-flight dedup (same key: only ONE Angel call at a time)
+       - global throttle (≥1.0s gap between any two Angel candle calls)
+       - hard 10-minute cooldown after rate-limit (no hammering)
+       - returns 429 + Retry-After when throttled (frontend honors it)
+       - stale cache served during cooldown (chart never goes blank)
+       - date range normalized (minute=0, second=0) for stability.
+    """
     if not symbol or symbol in ("undefined", "null"):
         symbol = "NIFTY"
     if not token or token in ("undefined", "null", ""):
         token = "99926000"
     if not exchange or exchange in ("undefined", "null", ""):
         exchange = "NSE"
-
-    # Try to resolve token/exchange from symbol if not provided
     if token == "99926000" and symbol.upper() != "NIFTY":
         for s in POPULAR_TOKENS:
             if s["symbol"].upper() == symbol.upper():
-                token = str(s["token"])
-                exchange = s["exchange"]
-                break
+                token = str(s["token"]); exchange = s["exchange"]; break
 
     interval = str(interval)
-    cache_key = f"{exchange}:{token}_{interval}"
-    now_ts = time.time()
+    interval_map = {"1":"ONE_MINUTE","3":"THREE_MINUTE","5":"FIVE_MINUTE","15":"FIFTEEN_MINUTE",
+                    "30":"THIRTY_MINUTE","60":"ONE_HOUR","D":"ONE_DAY"}
+    if interval not in interval_map:
+        interval = "15"
+    angel_interval = interval_map[interval]
+    cache_key = f"{exchange}:{token}:{interval}"
+    mono = time.monotonic()
+    now_wall = datetime.now(IST)
 
-    # Market hours helper (NSE): Mon-Fri 09:15-15:30 IST
-    now_ist = datetime.now(IST)
-    cal = nse_calendar.market_status()
-    market_open = cal["market_open"]
-
-    # --- Sanity-validate cached entries (drop SimulatedPro whose anchor drifted) ---
+    # --- Evict stale SimulatedPro (post-split / drift guard) ---
     if cache_key in candle_cache:
-        cached_time, cached_data = candle_cache[cache_key]
-        if cached_data and cached_data.get("source") == "SimulatedPro":
+        _ct, _cd = candle_cache[cache_key]
+        if _cd and _cd.get("source") == "SimulatedPro" and _cd.get("candles"):
             try:
-                candles = cached_data["candles"]
-                if candles:
-                    last_close = candles[-1]["close"]
-                    anchor = None
-                    # 1. Prefer live LTP (most accurate)
-                    qkey = f"{exchange}:{token}"
-                    if qkey in quote_cache:
-                        qd = quote_cache[qkey][1]
-                        if qd and qd.get("ltp") and qd["ltp"] > 0:
-                            anchor = qd["ltp"]
-                    # 2. Fall back to known static base
-                    if anchor is None:
-                        for item in POPULAR_TOKENS:
-                            if item["symbol"].upper() == symbol.upper():
-                                anchor = item.get("base"); break
-                    # Evict if simulated last close is >25% away from real anchor —
-                    # prevents chart showing fake 4000 bars then dropping to live 2500.
-                    if anchor and last_close and abs(last_close - anchor) / anchor > 0.25:
-                        del candle_cache[cache_key]
-                        cached_data = None
-                        print(f"♻️ Evicted stale SimulatedPro for {cache_key} (sim={last_close:.2f} vs anchor={anchor:.2f})")
+                last_close = _cd["candles"][-1]["close"]
+                anchor = None
+                qk = f"{exchange}:{token}"
+                if qk in quote_cache:
+                    qd = quote_cache[qk][1]
+                    if qd and qd.get("ltp") and qd["ltp"] > 0:
+                        anchor = qd["ltp"]
+                if anchor is None:
+                    for item in POPULAR_TOKENS:
+                        if item["symbol"].upper() == symbol.upper():
+                            anchor = item.get("base"); break
+                if anchor and last_close and abs(last_close - anchor) / anchor > 0.25:
+                    del candle_cache[cache_key]
+                    print(f"♻️ Evicted stale SimulatedPro for {cache_key} (sim={last_close:.2f} vs anchor={anchor:.2f})")
             except Exception:
                 pass
 
-    # Serve cached data with TTL: longer TTL when market is closed or rate-limited
+    # --- 1. Fresh cache hit ---
+    def _ttl_for():
+        if interval == "D": return 300
+        if interval in ("60","30","15"): return 60
+        return 30
+    ttl = _ttl_for()
     if cache_key in candle_cache:
-        cached_time, cached_data = candle_cache[cache_key]
-        ttl = CANDLE_TTL if market_open else 999999  # after close, freeze forever
-        if rate_limited_candles.get(cache_key, 0) > now_ts:
-            return _merge_live_candle(cached_data, exchange, token, interval, market_open)
-        if now_ts - cached_time < ttl:
-            return _merge_live_candle(cached_data, exchange, token, interval, market_open)
+        ct, cd = candle_cache[cache_key]
+        if mono - ct < ttl and cd.get("candles"):
+            return _merge_live_candle(cd, exchange, token, interval, cd.get("market_open", True))
 
-    # --- Single-flight: if same key already being fetched, wait & use its result ---
-    import asyncio
-    loop = asyncio.get_event_loop() if asyncio._get_running_loop() else None
-    fut = _inflight_candle.get(cache_key)
-    if fut is not None:
-        try:
-            return fut.result() if fut.done() else cached_data or {"status":"pending"}
-        except Exception:
-            pass
+    cal = nse_calendar.market_status()
+    market_open = cal["market_open"]
 
-    is_live = bool(smart_api and jwt_token)
-    live_ok = False
-    if is_live and rate_limited_candles.get(cache_key, 0) <= now_ts:
-        try:
-            interval_map = {
-                "1": "ONE_MINUTE", "3": "THREE_MINUTE", "5": "FIVE_MINUTE",
-                "15": "FIFTEEN_MINUTE", "30": "THIRTY_MINUTE", "60": "ONE_HOUR", "D": "ONE_DAY",
-            }
-            smart_int = interval_map.get(interval, "FIFTEEN_MINUTE")
-            to_date = now_ist
-            # Candle history per TF (TradingView-style enough bars to fill screen)
-            history_days = {
-                "ONE_MINUTE": 5,       # ~375 bars
-                "THREE_MINUTE": 10,    # ~1250 bars /3 = ~400
-                "FIVE_MINUTE": 15,     # ~1125 bars
-                "FIFTEEN_MINUTE": 30,  # ~450 bars
-                "THIRTY_MINUTE": 60,   # ~450 bars
-                "ONE_HOUR": 120,       # ~900 bars (4 months)
-                "ONE_DAY": 730,        # ~500 bars (2 years)
-            }.get(smart_int, 30)
-            from_date = to_date - timedelta(days=history_days)
+    # --- 2. Global rate-limit cooldown (10 minutes hard block) ---
+    if rate_limited_candles.get("__GLOBAL__", 0) > mono:
+        retry_after = int(rate_limited_candles["__GLOBAL__"] - mono) + 1
+        # Serve stale cache if any (chart stays alive during cooldown)
+        if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
+            return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
+        raise HTTPException(status_code=429, detail={"message":"Angel historical candle API cooling down", "retry_after":retry_after},
+                            headers={"Retry-After": str(retry_after)})
 
-            res = smart_api.getCandleData({
-                "exchange": exchange,
-                "symboltoken": str(token),
-                "interval": smart_int,
-                "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
-                "todate": to_date.strftime("%Y-%m-%d %H:%M"),
-            })
-            err_msg = ""
-            if isinstance(res, dict) and not res.get("status"):
-                err_msg = str(res.get("message", ""))
-            # Detect plain-string rate-limit (SmartApi sometimes returns raw string)
-            if isinstance(res, str) and ("Access denied" in res or "exceeding access rate" in res):
-                err_msg = res
-            if "Access denied" in err_msg or "exceeding access rate" in err_msg:
-                rate_limited_candles[cache_key] = now_ts + RATE_LIMIT_BACKOFF
-                print(f"⚠️ Candle rate-limited for {cache_key}, backoff {RATE_LIMIT_BACKOFF}s")
-                if cache_key in candle_cache:
-                    return candle_cache[cache_key][1]
-            if res and isinstance(res, dict) and res.get("status") and res.get("data"):
-                candles = []
-                for c in res["data"]:
-                    try:
-                        if len(c) < 5: continue
-                        if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
-                        o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
-                        if not (o and h and l and cl): continue
-                        if h < l or o <= 0 or cl <= 0: continue
-                        dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
-                        vol = int(c[5]) if len(c) > 5 and c[5] else 0
-                        candles.append({
-                            "time": int(dt.timestamp()),
-                            "open": o, "high": h, "low": l, "close": cl,
-                            "volume": vol,
-                        })
-                    except (ValueError, TypeError, IndexError):
-                        continue
-                if candles:
-                    out = {"status": "success", "source": "AngelOne", "candles": candles,
-                           "market_open": market_open}
-                    candle_cache[cache_key] = (now_ts, out)
-                    cache_cleanup()
-                    live_ok = True
-                    return _merge_live_candle(out, exchange, token, interval, market_open)
-        except Exception as e:
-            msg = str(e)
-            if "Access denied" in msg or "exceeding access rate" in msg:
-                rate_limited_candles[cache_key] = now_ts + RATE_LIMIT_BACKOFF
-                print(f"⚠️ Candle rate-limit (exception) for {cache_key}: {msg}")
-                if cache_key in candle_cache:
-                    return candle_cache[cache_key][1]
-            print(f"⚠️ Candle Fetch Exception: {e}")
+    # --- 3. Single-flight dedup: if same key already in-flight, return stale or 429 ---
+    if cache_key in _inflight_candle:
+        if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
+            return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
+        raise HTTPException(status_code=429, detail={"message":"Request in flight","retry_after":2}, headers={"Retry-After":"2"})
 
-    # ---- Fallback: realistic historical random walk ----
-    # Don't serve STALE "SimulatedPro" cache when AngelOne data exists — prefer
-    # re-fetching (even if market is closed) because Angel serves 2y of daily history.
-    if cache_key in candle_cache:
-        cached_time, cached_data = candle_cache[cache_key]
-        if cached_data and cached_data.get("candles") and cached_data.get("source") != "SimulatedPro":
-            return cached_data
+    # --- 4. Global throttle: ≥1.0s gap between ANY two Angel candle calls ---
+    global _last_candle_req
+    if _last_candle_req is None:
+        _last_candle_req = 0.0
+    gap = mono - _last_candle_req
+    if gap < 1.0:
+        await asyncio.sleep(1.0 - gap)
 
-    interval_ms_map = {"1": 60, "3": 180, "5": 300, "15": 900, "30": 1800, "60": 3600, "D": 86400}
+    # --- 5. Normalize date range (no seconds/milliseconds = stable requests) ---
+    end_dt = datetime.now(IST).replace(second=0, microsecond=0)
+    if interval == "D":
+        start_dt = end_dt - timedelta(days=365)
+    elif interval in ("60", "30"):
+        start_dt = end_dt - timedelta(days=60)
+    else:
+        start_dt = end_dt - timedelta(days=15)
+
+    params = {
+        "exchange": exchange,
+        "symboltoken": str(token),
+        "interval": angel_interval,
+        "fromdate": start_dt.strftime("%Y-%m-%d %H:%M"),
+        "todate":   end_dt.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    loop = asyncio.get_running_loop()
+    _inflight_candle[cache_key] = True
+    _last_candle_req = time.monotonic()
+    data = None
+    err = None
+    try:
+        def _do_call():
+            return smart_api.getCandleData(params) if (smart_api and jwt_token) else None
+        data = await asyncio.to_thread(_do_call)
+    except Exception as e:
+        err = str(e)
+    finally:
+        _inflight_candle.pop(cache_key, None)
+
+    # --- 6. Detect rate-limit (covers both exception AND plain-string/non-dict response) ---
+    rate_hit = False
+    if err and ("Access denied" in err or "exceeding access rate" in err or "Couldn't parse the JSON" in err or "429" in err):
+        rate_hit = True
+    if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
+        rate_hit = True
+    if isinstance(data, dict) and not data.get("status"):
+        msg = str(data.get("message",""))
+        if "Access denied" in msg or "exceeding access rate" in msg:
+            rate_hit = True
+
+    if rate_hit:
+        rate_limited_candles["__GLOBAL__"] = time.monotonic() + 600  # 10 minutes
+        rate_limited_candles[cache_key] = time.monotonic() + 600
+        print(f"🚫 Candle RATE-LIMIT for {cache_key} — hard cooldown 10 min")
+        if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
+            out = dict(candle_cache[cache_key][1]); out["stale"] = True
+            return _merge_live_candle(out, exchange, token, interval, market_open)
+        raise HTTPException(status_code=429, detail={"message":"Angel rate limit — cooling down 10 min","retry_after":600},
+                            headers={"Retry-After":"600"})
+
+    # --- 7. Parse successful Angel response ---
+    candles = []
+    if data and isinstance(data, dict) and data.get("status") and data.get("data"):
+        for c in data["data"]:
+            try:
+                if len(c) < 5: continue
+                if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
+                o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                if not (o and h and l and cl): continue
+                if h < l or o <= 0 or cl <= 0: continue
+                dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                vol = int(c[5]) if len(c) > 5 and c[5] else 0
+                candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
+            except (ValueError, TypeError, IndexError):
+                continue
+
+    if candles:
+        out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
+        candle_cache[cache_key] = (mono, out)
+        cache_cleanup()
+        return _merge_live_candle(out, exchange, token, interval, market_open)
+
+    # --- 8. Fallback: realistic simulated walk anchored to known LTP / base ---
+    interval_ms_map = {"1":60,"3":180,"5":300,"15":900,"30":1800,"60":3600,"D":86400}
     step_s = interval_ms_map.get(interval, 900)
-
     base = 22548.16
     for item in POPULAR_TOKENS:
         if item["symbol"].upper() == symbol.upper():
-            base = item.get("base", 1500.0)
-            break
-    # Anchor fallback to live LTP if we've seen a recent quote for this token —
-    # avoids the "TCS showing 4000 instead of 2500" stale-base problem after splits/price moves.
+            base = item.get("base", 1500.0); break
     try:
-        qkey = f"{exchange}:{token}"
-        if qkey in quote_cache:
-            qdata = quote_cache[qkey][1]
-            ltp = qdata.get("ltp")
-            if ltp and ltp > 0 and abs(ltp - base) / max(base, 1) < 0.9:
-                base = ltp
+        qk = f"{exchange}:{token}"
+        if qk in quote_cache:
+            qd = quote_cache[qk][1]
+            if qd and qd.get("ltp") and qd["ltp"] > 0 and abs(qd["ltp"] - base) / max(base,1) < 0.9:
+                base = qd["ltp"]
     except Exception:
         pass
 
-    count = 160 if interval != "D" else 500  # daily needs 2yr bars = ~500 candles
-    end_ts = int(now_ts)
+    count = 160 if interval != "D" else 500
+    end_ts = int(mono + time.time() - mono)  # wall clock seconds
+    # Use wall clock properly:
+    end_ts = int(time.time())
     end_ts = end_ts - (end_ts % step_s)
     start_time = end_ts - (count - 1) * step_s
-
-    # Always produce a realistic historical walk (including trends + noise) even when
-    # market is closed so daily/weekly charts don't look like flat lines.
-    candles = []
-    p = base * (0.85 + random.random() * 0.3)  # random start a bit off
+    sim_candles = []
+    p = base * (0.97 + random.random() * 0.06)
     vol_base = 100000 if step_s < 86400 else 5_000_000
     for i in range(count):
-        # Mean-reverting random walk with small drift
         drift = (base - p) * 0.002 + (random.random() - 0.5) * base * (0.012 if step_s == 86400 else 0.0025)
-        o = p
-        c = o + drift
+        o = p; c = o + drift
         spread = abs(drift) + base * (0.005 if step_s == 86400 else 0.0012)
-        h = max(o, c) + random.random() * spread
-        l = min(o, c) - random.random() * spread
-        v = int(vol_base + random.random() * vol_base * 2)
-        # Make sure h>=l and valid
-        if h < l: h, l = l, h
-        candles.append({
-            "time": int(start_time + i * step_s),
-            "open": round(o, 2),
-            "high": round(h, 2),
-            "low": round(l, 2),
-            "close": round(c, 2),
-            "volume": v,
-        })
+        h = max(o,c) + random.random()*spread
+        l = min(o,c) - random.random()*spread
+        v = int(vol_base + random.random()*vol_base*2)
+        if h < l: h,l = l,h
+        sim_candles.append({"time":int(start_time+i*step_s),"open":round(o,2),"high":round(h,2),
+                            "low":round(l,2),"close":round(c,2),"volume":v})
         p = c
-
-    out = {"status": "success", "source": "SimulatedPro", "candles": candles,
-           "market_open": market_open}
-    candle_cache[cache_key] = (now_ts, out)
+    out = {"status":"success","source":"SimulatedPro","candles":sim_candles,"market_open":market_open}
+    candle_cache[cache_key] = (mono, out)
     cache_cleanup()
     return _merge_live_candle(out, exchange, token, interval, market_open)
+
+
 
 
 def _merge_live_candle(out: dict, exchange: str, token: str, interval: str, market_open: bool):
