@@ -106,15 +106,14 @@ class TVBridge {
                 const dstTS = this.charts[dst].timeScale();
                 srcTS.subscribeVisibleLogicalRangeChange((range) => {
                     if (this._syncing) return;
+                    if (!range || range.from == null || range.to == null) return;
+                    if (range.from >= range.to) return;  // LWC would throw
                     this._syncing = true;
-                    dstTS.setVisibleLogicalRange(range, true);
+                    try { dstTS.setVisibleLogicalRange(range, true); } catch(_) {}
                     this._syncing = false;
                 });
             });
         });
-        // Note: crosshair is visually synced across panes because all charts share the
-        // same logical time range (via setVisibleLogicalRange sync). Skipping explicit
-        // setCrosshairPosition because LW v5 signature differs and causes "reading 'from'" errors.
     }
 
     _syncResize() {
@@ -269,20 +268,29 @@ class TVBridge {
     }
 
     _anchorToLatest(n) {
-        // Small delay ensures LW has finished computing layout before applying range
+        // Wait until after setData() has committed — rAF + timer ensures layout is ready
+        // and sub-charts (RSI/MACD) have their data attached before touching timeScale.
         const apply = () => {
-            const barsVisible = Math.min(80, Math.max(40, n - 1));
-            const fromIdx = Math.max(0, n - barsVisible);
-            const range = { from: fromIdx - 0.5, to: n + 6 };
+            if (!this.charts || !this.charts.main) return;
+            if (!this.currentData || this.currentData.length < 2) return;
+            const totalBars = this.currentData.length;
+            // Clamp n to actual data length — RSI/MACD may have fewer bars (indicator warmup)
+            const safeN = Math.min(n, totalBars);
+            const barsVisible = Math.min(80, Math.max(20, safeN - 1));
+            const fromIdx = Math.max(0, safeN - barsVisible);
+            const toIdx = safeN - 1;
+            if (fromIdx >= toIdx) return;  // invalid range — would throw in LWC
+            const range = { from: fromIdx - 0.5, to: toIdx + 6 };
             ['main','vol','rsi','macd'].forEach(k => {
+                if (!this.charts[k]) return;
                 try { this.charts[k].timeScale().setVisibleLogicalRange(range); } catch (_) {}
                 try { this.charts[k].timeScale().scrollToRealTime(); } catch (_) {}
             });
-            this._syncAxisWidths();
+            try { this._syncAxisWidths(); } catch (_) {}
         };
-        apply();
-        setTimeout(apply, 50);
-        setTimeout(apply, 250);
+        requestAnimationFrame(() => requestAnimationFrame(apply));
+        setTimeout(apply, 80);
+        setTimeout(apply, 350);
     }
 
     updateTick(candle) {
