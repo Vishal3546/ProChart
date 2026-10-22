@@ -69,9 +69,20 @@ class App {
         this.updateUIState();
         this.startClock();
         await this.checkServerStatus();
+        // Connect WebSocket FIRST (real-time ticks start immediately),
+        // then delay historical candle fetch — gives WS a moment to establish
+        // and avoids slamming Angel API on page open (TradingView-style).
+        this.connectLiveStream();
+        this.startLiveQuotePolling();
+        // Staggered candle load: wait for first WS tick or 4s whichever first,
+        // then fire candles. Server throttle handles the rest.
+        await new Promise(resolve => {
+            const done = () => { this._initCandleWait=null; resolve(); };
+            const start = Date.now();
+            this._initCandleWait = done;
+            setTimeout(done, 4000);  // max 4s wait
+        });
         await this.loadChartData(this.activeSymbol, this.activeTimeframe);
-        this.connectLiveStream();   // WebSocket-backed SSE (realtime)
-        this.startLiveQuotePolling();  // fallback/poll every 10s for LTP sanity
     }
 
     // --------------- LIVE WS (SSE) ---------------
@@ -141,6 +152,8 @@ class App {
         const prevClose = this.prevClose || t.prev_close || t.ltp;
         this.lastLtp = t.ltp;
         this._lastWsTickAt = Date.now();
+        // Resolve initial candle wait if this is the first live tick
+        if (this._initCandleWait) { const cb = this._initCandleWait; this._initCandleWait = null; cb(); }
         this.updateHeaderPrice(t.ltp, t.ltp - prevClose);
         const spot = document.getElementById('greekSpot');
         if (spot) spot.value = t.ltp.toFixed(2);
@@ -290,7 +303,7 @@ class App {
                 this._pendingLoadTimer = setTimeout(() => {
                     if (abortSig.aborted) return;
                     this.loadChartData(this.activeSymbol, this.activeTimeframe);
-                }, 150);
+                }, 700);  // 700ms debounce — last click only
             });
         });
     }
@@ -537,6 +550,14 @@ class App {
             this._lastGoodPrice[symbol] = candles[candles.length - 1].close;
         }
 
+        if (cd && cd.loading && (!candles || candles.length === 0)) {
+            // No real data available yet — show "Loading..." and retry in 5s
+            const el = document.getElementById('trendBiasResult');
+            if (el) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
+            clearTimeout(this._retryLoadTimer);
+            this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf), 5000);
+            return;
+        }
         if (candles && candles.length > 0) {
             this.tvBridge.setCandleData(candles);
             requestAnimationFrame(() => {

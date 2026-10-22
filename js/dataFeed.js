@@ -30,10 +30,9 @@ class DataFeed {
         // --- Global client-side cooldown (don't hammer if server said 429) ---
         const now = Date.now();
         if (now < this._candleCooldownUntil) {
-            // Return in-flight promise if exists
             if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
-            const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-            return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', cooldown: true };
+            // Return empty/loading instead of fake NIFTY candles
+            return { candles: [], source: 'SimulatedPro', cooldown: true, loading: true };
         }
 
         // --- Single-flight: if same key already fetching, reuse promise ---

@@ -306,10 +306,11 @@ candle_cache = {}
 quote_cache = {}
 MAX_CACHE_SIZE = 50
 QUOTE_TTL = 3.0          # quote cache TTL (seconds) — prevents hammering every poll
-CANDLE_TTL = 30.0        # candle cache TTL (longer TTL prevents burst rate-limits)
-RATE_LIMIT_BACKOFF = 180 # after rate-limit, wait 3 minutes before retrying
+CANDLE_TTL = 60.0        # candle cache TTL (1 minute — very conservative for Angel)
+RATE_LIMIT_BACKOFF = 300 # 5 minutes after first hit
 _inflight_candle = {}    # per cache_key: single-flight guard
-_last_candle_req = None   # monotonic timestamp of last Angel candle call (global 1/sec throttle)
+_last_candle_req = None  # monotonic timestamp of last Angel candle call (global throttle)
+GLOBAL_CANDLE_GAP = 3.0  # MINIMUM 3 seconds between ANY two Angel historical calls (Angel enforces strict per-IP limits)
 rate_limited_candles = {}
 rate_limited_quotes = {}
 
@@ -580,13 +581,14 @@ async def get_candles(
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
         raise HTTPException(status_code=429, detail={"message":"Request in flight","retry_after":2}, headers={"Retry-After":"2"})
 
-    # --- 4. Global throttle: ≥1.0s gap between ANY two Angel candle calls ---
+    # --- 4. Global throttle: ≥GLOBAL_CANDLE_GAP seconds between ANY two Angel historical calls ---
+    # (Angel's historical API is heavily per-IP rate-limited; TradingView & Zerodha use similar pacing.)
     global _last_candle_req
     if _last_candle_req is None:
         _last_candle_req = 0.0
     gap = mono - _last_candle_req
-    if gap < 1.0:
-        await asyncio.sleep(1.0 - gap)
+    if gap < GLOBAL_CANDLE_GAP:
+        await asyncio.sleep(GLOBAL_CANDLE_GAP - gap)
 
     # --- 5. Normalize date range (no seconds/milliseconds = stable requests) ---
     end_dt = datetime.now(IST).replace(second=0, microsecond=0)
@@ -671,10 +673,12 @@ async def get_candles(
         cache_cleanup()
         return _merge_live_candle(out, exchange, token, interval, market_open)
 
-    # --- 8. Fallback: realistic simulated walk anchored to known LTP / base ---
+    # --- 8. Fallback: only generate simulated candles if we have a real anchor (LTP or known base) ---
+    # If we have neither (e.g. unknown smallcap not in POPULAR_TOKENS and no quote yet),
+    # return EMPTY candles — TradingView-style "Loading..." instead of fake NIFTY 22668 data.
     interval_ms_map = {"1":60,"3":180,"5":300,"15":900,"30":1800,"60":3600,"D":86400}
     step_s = interval_ms_map.get(interval, 900)
-    base = 22548.16
+    base = None
     for item in POPULAR_TOKENS:
         if item["symbol"].upper() == symbol.upper():
             base = item.get("base", 1500.0); break
@@ -682,19 +686,22 @@ async def get_candles(
         qk = f"{exchange}:{token}"
         if qk in quote_cache:
             qd = quote_cache[qk][1]
-            if qd and qd.get("ltp") and qd["ltp"] > 0 and abs(qd["ltp"] - base) / max(base,1) < 0.9:
+            if qd and qd.get("ltp") and qd["ltp"] > 0:
                 base = qd["ltp"]
     except Exception:
         pass
+    if base is None or base <= 0:
+        # No real anchor — don't invent fake data. Send empty with status loading.
+        out = {"status":"success","source":"SimulatedPro","candles":[],"market_open":market_open,"loading":True}
+        return out
 
     count = 160 if interval != "D" else 500
-    end_ts = int(mono + time.time() - mono)  # wall clock seconds
-    # Use wall clock properly:
     end_ts = int(time.time())
     end_ts = end_ts - (end_ts % step_s)
     start_time = end_ts - (count - 1) * step_s
     sim_candles = []
-    p = base * (0.97 + random.random() * 0.06)
+    p = base * (0.99 + random.random() * 0.02)  # tight start near anchor — no 93% cliffs
+    vol_base = 100000 if step_s < 86400 else 5_000_000
     vol_base = 100000 if step_s < 86400 else 5_000_000
     for i in range(count):
         drift = (base - p) * 0.002 + (random.random() - 0.5) * base * (0.012 if step_s == 86400 else 0.0025)
