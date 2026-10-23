@@ -855,7 +855,7 @@ class App {
                         <div>RR2<br><b style="color:${plan.rr2>=2?'#089981':'#ffae00'}">1:${plan.rr2.toFixed(2)}</b></div>
                     </div>
                     <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${plan.rr1>=1.5?'#089981':'#f23645'};">${plan.verdict}</div>
-                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹1L capital @ 1% risk): <b style="color:#fff">${plan.qty_1pct_risk_cap_1L}</b> shares</div>
+                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk}</b> shares</div>
                 `;
                 el.className = '';
             } else if (el) {

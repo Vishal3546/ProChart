@@ -17,8 +17,10 @@ class VCPPatternEngine {
 
         // Find recent swing highs over last 60 bars (prominent pivots)
         const pivots = [];
-        for (let i = n - 5; i >= Math.max(20, n - 60); i--) {
-            const w = 3;
+        const w = 3;
+        for (let i = n - 1 - w; i >= Math.max(w, n - 60); i--) {
+            // Hard boundary — need w bars on both sides to avoid out-of-bounds false pivots
+            if (i - w < 0 || i + w >= n) continue;
             let isPivot = true;
             for (let j = 1; j <= w; j++) {
                 if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) { isPivot = false; break; }
@@ -36,10 +38,16 @@ class VCPPatternEngine {
         for (let k = 1; k < pivots.length; k++) {
             const prev = pivots[k - 1];
             const cur = pivots[k];
-            const segHigh = Math.max(...highs.slice(prev.i, cur.i + 1));
-            const segLow = Math.min(...lows.slice(prev.i, cur.i + 1));
+            if (prev.i >= cur.i) continue;  // defensive guard
+            const segHighs = highs.slice(prev.i, cur.i + 1);
+            const segLows = lows.slice(prev.i, cur.i + 1);
+            if (!segHighs.length || !segLows.length) continue;
+            const segHigh = Math.max(...segHighs);
+            const segLow = Math.min(...segLows);
+            if (segLow <= 0) continue;
             const rangePct = (segHigh - segLow) / segLow;
-            const segVol = vols.slice(prev.i, cur.i + 1).reduce((a, b) => a + b, 0) / (cur.i - prev.i + 1);
+            const segVolSum = vols.slice(prev.i, cur.i + 1).reduce((a, b) => a + b, 0);
+            const segVol = segVolSum / (cur.i - prev.i + 1);
             contractions.push({ rangePct, avgVol: segVol });
         }
 

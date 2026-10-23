@@ -4,7 +4,7 @@
  * Versioned keys, non-blocking, multi-symbol safe
  * ============================================================ */
 const IDB_NAME = 'ProChartTerminal';
-const IDB_VER = 4;
+const IDB_VER = 5;
 const STORE = 'candles';
 const META_STORE = 'meta';
 const MAX_RAM_ENTRIES = 24; // hot LRU

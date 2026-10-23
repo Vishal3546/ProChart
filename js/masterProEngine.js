@@ -23,6 +23,16 @@ class MasterProEngine {
             if (bb.width[i] != null) widths.push(bb.width[i]);
         }
         const curW = bb.width[n - 1];
+        if (curW == null || !isFinite(curW)) {
+            // BB not ready → skip squeeze detection
+            return {
+                squeeze: { active: false, label: '—', level: 'muted' },
+                vsa:     { label: '—', level: 'muted' },
+                macd:    { label: '—', level: 'muted' },
+                rsi:     { label: '—', level: 'muted' },
+                score:   0,
+            };
+        }
         const avgW = widths.length ? widths.reduce((a, b) => a + b, 0) / widths.length : curW;
         const minW = widths.length ? Math.min(...widths.slice(-60)) : curW;
         let squeezeLabel = 'NORMAL';
@@ -72,9 +82,10 @@ class MasterProEngine {
             }
         }
 
-        // 4) RSI REGIME (must be valid 0-100 number; early bars return 0 which is not an oversold signal)
-        const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        let rsi = rsiArr[n - 1];
+        // 4) RSI REGIME (defensive parse — handles raw/object format)
+        const rsiArr = TechnicalIndicators.RSI(candles, 14) || [];
+        let rsiRaw = rsiArr[n - 1];
+        let rsi = (rsiRaw != null && typeof rsiRaw === 'object') ? rsiRaw.value : rsiRaw;
         if (!isFinite(rsi) || rsi <= 0 || rsi >= 100) rsi = 50;  // invalid / not enough data → neutral
         let rsiLabel = 'NEUTRAL';
         let rsiLevel = 'muted';

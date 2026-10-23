@@ -37,14 +37,23 @@ class TradingPlanEngine {
         const sd = Math.sqrt(closes.slice(-20).reduce((s, v) => s + (v - mid) ** 2, 0) / 20);
         const bbUpper = mid + 2 * sd;
         const bbLower = mid - 2 * sd;
-        // VWAP
-        let pv = 0, v = 0;
-        for (let i = 0; i < n; i++) {
-            const tp = (highs[i] + lows[i] + closes[i]) / 3;
-            const vol = candles[i].volume || 0;
-            pv += tp * vol; v += vol;
+        // VWAP — session-anchored (TradingView standard)
+        let vwap = ltp;
+        if (window.TechnicalIndicators && TechnicalIndicators.VWAP) {
+            const vwapArr = TechnicalIndicators.VWAP(candles);
+            const lastVwap = vwapArr[vwapArr.length - 1];
+            if (isFinite(lastVwap) && lastVwap > 0) vwap = lastVwap;
+        } else {
+            // Fallback: last 75 bars (approximates 1 session on 5m TF)
+            let pv = 0, v = 0;
+            const lookback = Math.min(75, n);
+            for (let i = n - lookback; i < n; i++) {
+                const tp = (highs[i] + lows[i] + closes[i]) / 3;
+                const vol = candles[i].volume || 0;
+                pv += tp * vol; v += vol;
+            }
+            vwap = v ? pv / v : ltp;
         }
-        const vwap = v ? pv / v : ltp;
         // ATR(14)
         const trs = [];
         for (let i = 1; i < n; i++) {
@@ -100,8 +109,11 @@ class TradingPlanEngine {
             // SL: below nearest valid swing low with ATR buffer. If calculated SL ends up
             // ABOVE entry (edge case), fall back to entry - 1.5*ATR.
             sl = swingLow - 0.25 * atr;
-            if (sl >= entry) sl = entry - 1.5 * atr;
-            slReason = (swingLow < entry) ? `Swing low ${swingLow.toFixed(2)} - 0.25 ATR` : '1.5 ATR stop';
+            let slDegraded = false;
+            if (sl >= entry) { sl = entry - 1.5 * atr; slDegraded = true; }
+            slReason = slDegraded
+                ? `1.5 ATR stop (no valid swing low below entry ${entry.toFixed(2)})`
+                : `Swing low ${swingLow.toFixed(2)} - 0.25 ATR`;
             // T1: nearest resistance above entry (BB upper or recent swing high, whichever is closer)
             t1 = Math.min(bbUpper, swingHigh + 0.5 * atr);
             if (t1 <= entry) t1 = entry + Math.max(atr, (entry - sl) * 1.5);  // safety floor
@@ -116,8 +128,11 @@ class TradingPlanEngine {
             entryReason = entry.toFixed(2) === ltp.toFixed(2) ? 'Breakdown / momentum' :
                           (entry.toFixed(2) === ema20.toFixed(2) ? 'EMA20 pullback' : 'VWAP pullback');
             sl = swingHigh + 0.25 * atr;
-            if (sl <= entry) sl = entry + 1.5 * atr;
-            slReason = (swingHigh > entry) ? `Swing high ${swingHigh.toFixed(2)} + 0.25 ATR` : '1.5 ATR stop';
+            let slDegraded = false;
+            if (sl <= entry) { sl = entry + 1.5 * atr; slDegraded = true; }
+            slReason = slDegraded
+                ? `1.5 ATR stop (no valid swing high above entry ${entry.toFixed(2)})`
+                : `Swing high ${swingHigh.toFixed(2)} + 0.25 ATR`;
             t1 = Math.max(bbLower, swingLow - 0.5 * atr);
             if (t1 >= entry) t1 = entry - Math.max(atr, (sl - entry) * 1.5);
             t1Reason = 'BB lower / swing low';
@@ -136,10 +151,11 @@ class TradingPlanEngine {
         const actionable = Math.abs(distPct) < 0.6;  // within 0.6% of LTP
         const pending = !actionable;
 
-        // 1% risk rule: how many shares/contracts for ₹1,00,000 capital risking 1%?
-        const capital = 100000;
+        // 1% risk rule: configurable capital / risk % (reads window.USER_CAPITAL if set)
+        const capital = window.USER_CAPITAL || 100000;
+        const riskPct = window.USER_RISK_PCT || 0.01;  // 1% default per trade
         const riskPerShare = Math.abs(entry - sl);
-        const qty = riskPerShare > 0 ? Math.floor((capital * 0.01) / riskPerShare) : 0;
+        const qty = riskPerShare > 0 ? Math.floor((capital * riskPct) / riskPerShare) : 0;
 
         return {
             ready: true,
@@ -158,7 +174,9 @@ class TradingPlanEngine {
             rr2: +rr2.toFixed(2),
             dist_pct: +distPct.toFixed(2),
             atr: +atr.toFixed(2),
-            qty_1pct_risk_cap_1L: qty,
+            qty_at_risk: qty,
+            capital_used: capital,
+            risk_pct: +(riskPct * 100).toFixed(2),
             verdict: rr1 >= 1.5 ? '✅ High probability setup (RR ≥ 1.5)' :
                      rr1 >= 1.0 ? '⚠️ Marginal setup (RR 1:1)' :
                      '❌ Skip — RR too low',

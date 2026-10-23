@@ -42,18 +42,27 @@ class TrendBiasEngine {
         const ema50 = this._ema(closes, 50);
         const lastClose = closes[n - 1];
 
-        // VWAP (session, anchored at first bar in dataset — good for intraday)
-        let pv = 0, v = 0;
-        for (let i = 0; i < n; i++) {
-            const tp = (highs[i] + lows[i] + closes[i]) / 3;
-            pv += tp * vols[i];
-            v += vols[i];
+        // VWAP — session-anchored (TradingView standard; falls back to recent 75 bars)
+        let vwap = lastClose;
+        if (TechnicalIndicators && TechnicalIndicators.VWAP) {
+            const vwapArr = TechnicalIndicators.VWAP(candles);
+            const lv = vwapArr[vwapArr.length - 1];
+            if (isFinite(lv) && lv > 0) vwap = lv;
+        } else {
+            let pv = 0, v = 0;
+            const lookback = Math.min(75, n);
+            for (let i = n - lookback; i < n; i++) {
+                const tp = (highs[i] + lows[i] + closes[i]) / 3;
+                pv += tp * vols[i];
+                v += vols[i];
+            }
+            vwap = v ? pv / v : lastClose;
         }
-        const vwap = v ? pv / v : lastClose;
 
-        // RSI (returns numeric array; early bars = 0 → treat as 50 neutral)
-        const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        let rsi = rsiArr.length ? rsiArr[rsiArr.length - 1] : 50;
+        // RSI — handles both raw numbers and {value: X} objects for forward-compat
+        const rsiArr = TechnicalIndicators.RSI(candles, 14) || [];
+        let rsiRaw = rsiArr.length ? rsiArr[rsiArr.length - 1] : null;
+        let rsi = (rsiRaw != null && typeof rsiRaw === 'object') ? rsiRaw.value : rsiRaw;
         if (!isFinite(rsi) || rsi <= 0 || rsi >= 100) rsi = 50;
 
         // MACD histogram
@@ -111,8 +120,10 @@ class TrendBiasEngine {
             );
             trs.push(tr);
         }
-        let atr = trs.slice(0, p).reduce((s, v) => s + v, 0) / p;
-        for (let i = p; i < trs.length; i++) atr = (atr * (p - 1) + trs[i]) / p;
+        if (trs.length === 0) return 0;
+        const effP = Math.min(p, trs.length);
+        let atr = trs.slice(0, effP).reduce((s, v) => s + v, 0) / effP;
+        for (let i = effP; i < trs.length; i++) atr = (atr * (effP - 1) + trs[i]) / effP;
         return atr;
     }
 

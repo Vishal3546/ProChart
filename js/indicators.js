@@ -26,16 +26,8 @@ const TechnicalIndicators = (() => {
         return data.map(d => (d && isNum(d.low)) ? d.low : null);
     };
     const zeros = (n) => new Array(n).fill(null);
-    const replaceLeadingNulls = (arr) => {
-        // EMA/MACD chain must not hand null to arithmetic; first available value for each series
-        // is passed through; interior nulls remain null (rare).
-        let first = null;
-        for (let i = 0; i < arr.length; i++) {
-            if (arr[i] != null) { first = arr[i]; continue; }
-            if (first != null) arr[i] = null; // leave
-        }
-        return arr;
-    };
+
+    // (removed dead code: replaceLeadingNulls was defined but never called)
 
     // ---------- SMA (null-safe) ----------
     function SMA(data, period) {

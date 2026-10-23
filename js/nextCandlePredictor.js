@@ -56,9 +56,12 @@ class NextCandlePredictor {
         else if (emaSlope < -0.1) { score -= 8; factors.push(`EMA20 falling (${emaSlope.toFixed(2)}%)`); }
 
         // ---------- 2. RSI regime ----------
-        const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        const rsi = rsiArr.length ? rsiArr[rsiArr.length - 1].value : 50;
-        const rsiPrev = rsiArr.length > 1 ? rsiArr[rsiArr.length - 2].value : 50;
+        const rsiArr = TechnicalIndicators.RSI(candles, 14) || [];
+        const _rsiVal = (v) => (v != null && typeof v === 'object') ? (v.value ?? null) : v;
+        let rsi = rsiArr.length ? _rsiVal(rsiArr[rsiArr.length - 1]) : 50;
+        let rsiPrev = rsiArr.length > 1 ? _rsiVal(rsiArr[rsiArr.length - 2]) : 50;
+        if (!isFinite(rsi) || rsi == null) rsi = 50;
+        if (!isFinite(rsiPrev) || rsiPrev == null) rsiPrev = 50;
         if (rsi != null) {
             if (rsi < 30) { score += 12; factors.push(`RSI oversold (${rsi.toFixed(0)}) — bounce setup`); }
             else if (rsi > 70) { score -= 12; factors.push(`RSI overbought (${rsi.toFixed(0)}) — pullback risk`); }
@@ -68,15 +71,18 @@ class NextCandlePredictor {
 
         // ---------- 3. MACD ----------
         const macd = TechnicalIndicators.MACD(candles);
-        if (macd) {
+        if (macd && macd.macd && macd.macd.length >= 2) {
             const mL = macd.macd.length;
             const mCur = macd.macd[mL - 1], mPrev = macd.macd[mL - 2];
             const sCur = macd.signal[mL - 1], sPrev = macd.signal[mL - 2];
             const hCur = macd.hist[mL - 1], hPrev = macd.hist[mL - 2];
-            if (mCur > sCur && mPrev <= sPrev) { score += 18; factors.push('MACD bullish crossover'); }
-            else if (mCur < sCur && mPrev >= sPrev) { score -= 18; factors.push('MACD bearish crossover'); }
-            if (hCur > 0 && hCur > hPrev) score += 5;
-            else if (hCur < 0 && hCur < hPrev) score -= 5;
+            // All must be finite numbers (null-guard)
+            if ([mCur, mPrev, sCur, sPrev, hCur, hPrev].every(v => isFinite(v))) {
+                if (mCur > sCur && mPrev <= sPrev) { score += 18; factors.push('MACD bullish crossover'); }
+                else if (mCur < sCur && mPrev >= sPrev) { score -= 18; factors.push('MACD bearish crossover'); }
+                if (hCur > 0 && hCur > hPrev) score += 5;
+                else if (hCur < 0 && hCur < hPrev) score -= 5;
+            }
         }
 
         // ---------- 4. Bollinger position ----------
@@ -86,10 +92,15 @@ class NextCandlePredictor {
         if (last.close <= lower) { score += 10; factors.push('Price at BB lower (mean-reversion long)'); }
         else if (last.close >= upper) { score -= 10; factors.push('Price at BB upper (mean-reversion short)'); }
 
-        // ---------- 5. VWAP position (intraday only — last 20 bars simple VWAP) ----------
+        // ---------- 5. VWAP position (session-anchored, TradingView standard) ----------
         const vw = (() => {
+            if (TechnicalIndicators && TechnicalIndicators.VWAP) {
+                const vwapArr = TechnicalIndicators.VWAP(candles);
+                const lv = vwapArr[vwapArr.length - 1];
+                if (isFinite(lv) && lv > 0) return lv;
+            }
             let pv = 0, v = 0;
-            const look = Math.min(26, n);
+            const look = Math.min(75, n);  // ~1 session on 5m TF
             for (let i = n - look; i < n; i++) {
                 const tp = (candles[i].high + candles[i].low + candles[i].close) / 3;
                 pv += tp * (candles[i].volume || 0);

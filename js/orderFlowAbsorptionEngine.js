@@ -13,6 +13,10 @@ class OrderFlowAbsorptionEngine {
         const n = candles.length;
         const vols = candles.map(c => c.volume || 0);
         const avgVol20 = vols.slice(-20).reduce((a, b) => a + b, 0) / 20;
+        // Skip indices/no-volume feeds (NIFTY, BANKNIFTY, etc. — volume field near-zero)
+        if (avgVol20 < 100) {
+            return { detected: false, label: '⚪ NO VOLUME DATA', level: 'muted', signals: [] };
+        }
 
         const signals = [];
         // Inspect last 5 bars

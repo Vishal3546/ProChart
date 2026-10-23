@@ -215,7 +215,7 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v39'; }
+    _cacheVersion() { return 'v40'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         if (!candles || !candles.length) return;

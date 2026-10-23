@@ -32,8 +32,9 @@ class GreeksEngine {
         const R = (Number(r) || 0) / 100;
         const Q = (Number(div) || 0) / 100;
 
-        if (S <= 0 || K <= 0 || sigma <= 0 || T <= 0) {
-            return { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, iv_pct: Number(ivPct) };
+        // Sanity checks (IV >500% or absurd spot/strike = reject; fat-finger protection)
+        if (S <= 0 || K <= 0 || sigma <= 0 || T <= 0 || sigma > 5 || S > 1e7 || K > 1e7) {
+            return { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0, iv_pct: Number(ivPct), error: 'Invalid inputs' };
         }
 
         const sqrtT = Math.sqrt(T);
@@ -64,6 +65,16 @@ class GreeksEngine {
         vega = S * discQ * pdf * sqrtT / 100; // per 1% IV change
         const thetaPerDay = theta / 365;
 
+        // Option fair value (Black-Scholes price)
+        let price;
+        if (type === 'PE') {
+            price = K * discR * this.N(-d2) - S * discQ * this.N(-d1);
+        } else {
+            price = S * discQ * cdfD1 - K * discR * cdfD2;
+        }
+        const intrinsic = type === 'CE' ? Math.max(0, S - K) : Math.max(0, K - S);
+        const timeValue = Math.max(0, price - intrinsic);
+
         return {
             delta: +delta.toFixed(4),
             gamma: +gamma.toFixed(6),
@@ -71,6 +82,10 @@ class GreeksEngine {
             vega:  +vega.toFixed(2),
             rho:  +rho.toFixed(2),
             iv_pct: Number(ivPct),
+            price: +price.toFixed(2),
+            intrinsic: +intrinsic.toFixed(2),
+            time_value: +timeValue.toFixed(2),
+            moneyness: type === 'CE' ? (S >= K ? 'ITM' : 'OTM') : (S <= K ? 'ITM' : 'OTM'),
         };
     }
 }
