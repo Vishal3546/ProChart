@@ -12,11 +12,22 @@ class DataFeed {
             this.baseUrl = '';
         }
         this._candleInFlight = new Map();  // per-key: Promise (single-flight)
-        this._candleCooldownUntil = 0;     // ms timestamp
-        this._candleAbort = new Map();     // per-key AbortController to cancel stale fetches on TF switch
-        this._quoteInFlight = null;        // Promise dedupe
+        this._candleCooldownUntil = 0;     // global cooldown ms timestamp
+        this._perKeyCooldown = new Map();  // per-cacheKey cooldown until ms timestamp
+        this._candleAbort = new Map();     // per-key AbortController
+        this._quoteInFlight = null;
         this._lastQuoteKey = null;
         this._lastQuoteAt = 0;
+        // Purge old-version caches immediately on startup
+        this._purgeOldCaches && this._purgeOldCaches();
+    }
+
+    /** Returns ms until cooldown expires for given key, 0 if safe to call */
+    _cooldownMsFor(cKey) {
+        const now = Date.now();
+        const g = Math.max(0, this._candleCooldownUntil - now);
+        const pk = Math.max(0, (this._perKeyCooldown.get(cKey) || 0) - now);
+        return Math.max(g, pk);
     }
 
     /** Cancel any in-flight candle fetch for a specific key (called on TF/symbol switch) */
@@ -39,15 +50,17 @@ class DataFeed {
         const exchange = meta.exchange || 'NSE';
         const cKey = `${exchange}:${token}:${timeframe}`;
 
-        // --- Global client-side cooldown (don't hammer if server said 429) ---
         const now = Date.now();
-        if (now < this._candleCooldownUntil) {
-            if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
-            // Return empty/loading instead of fake NIFTY candles
-            return { candles: [], source: 'SimulatedPro', cooldown: true, loading: true };
+        // Respect PER-KEY cooldown (server told us this exact key is rate-limited — don't hammer)
+        const pkUntil = this._perKeyCooldown.get(cKey) || 0;
+        const cdMs = Math.max(0, this._candleCooldownUntil - now, pkUntil - now);
+        if (cdMs > 500) {
+            const cached = this._loadLocalCache(symbol, timeframe);
+            if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
+            return { candles: [], source: 'Cooldown', loading: true, cooldown: true, retryAfterMs: cdMs };
         }
 
-        // --- Single-flight: if same key already fetching, reuse promise ---
+        // Single-flight dedup
         if (this._candleInFlight.has(cKey)) return this._candleInFlight.get(cKey);
 
         const p = (async () => {
@@ -64,14 +77,19 @@ class DataFeed {
                 const res = await fetch(url, fopt);
                 if (res.status === 429) {
                     let retry = 30;
-                    try { const j = await res.json(); retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 30; } catch(_){}
-                    this._candleCooldownUntil = Date.now() + retry * 1000;
+                    try { const j = await res.json();
+                        retry = (j && j.detail && j.detail.retry_after) || parseInt(res.headers.get('Retry-After')) || 30;
+                        // If server returned a per-key hint, honour it
+                        if (j && j.detail && j.detail.key === cKey) {
+                            this._perKeyCooldown.set(cKey, Date.now() + retry * 1000);
+                        }
+                    } catch(_){}
+                    // Set both global + per-key cooldown to be safe
+                    this._perKeyCooldown.set(cKey, Date.now() + retry * 1000);
                     console.warn(`Candle 429 — cooling down ${retry}s for ${cKey}`);
                     const cached = this._loadLocalCache(symbol, timeframe);
                     if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
-                    // Graceful fallback instead of throwing
-                    const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-                    return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', cooldown: true };
+                    return { candles: [], source: 'Cooldown', loading: true, cooldown: true, retryAfterMs: retry*1000 };
                 }
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
@@ -82,11 +100,27 @@ class DataFeed {
                 const isFake = data && data.source && (data.source === 'SimulatedPro' || data.source === 'Cooldown' || data.source === 'InFlight');
                 if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0 && !isFake) {
                     const candles = this.formatCandles(data.candles);
-                    if (data.source === 'AngelOne') this._saveLocalCache(symbol, timeframe, candles);
-                    return { candles, source: data.source || 'unknown' };
+                    // Price-divergence sanity: don't save to localStorage if last candle is >25% off known LTP
+                    // (defense in depth — server already does this check too)
+                    let sane = true;
+                    try {
+                        const ltp = window._app && (window._app.lastLtp || (window._app._lastGoodPrice && window._app._lastGoodPrice[symbol]));
+                        if (ltp && ltp > 0 && candles.length > 0) {
+                            const lc = candles[candles.length-1].close;
+                            const r = lc / ltp;
+                            if (r < 0.75 || r > 1.25) {
+                                const pct = ((r-1)*100).toFixed(1);
+                            console.warn('⚠️ Client sanity REJECT ' + cKey + ': last close ' + lc + ' vs LTP ' + ltp + ' (' + pct + '%) — NOT caching');
+                                sane = false;
+                            }
+                        }
+                    } catch(_){}
+                    if (data.source === 'AngelOne' && sane) this._saveLocalCache(symbol, timeframe, candles);
+                    return { candles, source: data.source || 'unknown', sanityRejected: !sane };
                 }
                 if (isFake) {
-                    // Fake/cooldown data: use localStorage cache if available; otherwise return loading (no fake render)
+                    // Server sent fake/cooldown/inflight — set per-key cooldown to prevent retries hammering
+                    if (data.source === 'Cooldown') this._perKeyCooldown.set(cKey, Date.now() + 30000);
                     const cached = this._loadLocalCache(symbol, timeframe);
                     if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                     return { candles: [], source: data.source, loading: true, cooldown: data.source === 'Cooldown' };
@@ -158,26 +192,46 @@ class DataFeed {
     }
 
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
-    _cacheKey(symbol, tf) { return `pc_cdl_${symbol}_${tf}`; }
+    // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
+    // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
+    _cacheVersion() { return 'v27'; }
+    _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         try {
-            // Trim to last 500 candles & store (localStorage ~5MB limit)
             const trimmed = candles.slice(-500);
             localStorage.setItem(this._cacheKey(symbol, tf), JSON.stringify({ t: Date.now(), c: trimmed }));
         } catch(e) {}
     }
     _loadLocalCache(symbol, tf) {
         try {
+            // Also wipe ANY old-format (non-versioned) caches on sight — prevents stale
+            // simulated data from previous versions from leaking onto charts.
+            this._purgeOldCaches();
             const raw = localStorage.getItem(this._cacheKey(symbol, tf));
             if (!raw) return null;
             const obj = JSON.parse(raw);
             if (!obj || !obj.c || !Array.isArray(obj.c)) return null;
-            // Use cache if < 24h old (intraday) or < 7 days (daily)
             const age = Date.now() - (obj.t || 0);
-            const maxAge = tf === 'D' ? 7*86400*1000 : 8*3600*1000;  // 8h intraday, 7d daily
+            const maxAge = tf === 'D' ? 7*86400*1000 : 8*3600*1000;
             if (age > maxAge) return null;
             return this.formatCandles(obj.c);
         } catch(e) { return null; }
+    }
+    _purgeOldCaches() {
+        if (this._purged) return;
+        this._purged = true;
+        try {
+            const toRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (!k) continue;
+                if (k.startsWith('pc_cdl_') && !k.startsWith(`pc_cdl_${this._cacheVersion()}_`)) {
+                    toRemove.push(k);
+                }
+            }
+            toRemove.forEach(k => { try { localStorage.removeItem(k); } catch(_){} });
+            if (toRemove.length) console.log(`🧹 Purged ${toRemove.length} stale candle caches from older versions`);
+        } catch(_) {}
     }
 
     formatCandles(rawCandles) {

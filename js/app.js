@@ -69,11 +69,12 @@ class App {
         this.updateUIState();
         this.startClock();
         await this.checkServerStatus();
-        // Connect WebSocket FIRST (real-time ticks start immediately),
-        // then delay historical candle fetch — gives WS a moment to establish
-        // and avoids slamming Angel API on page open (TradingView-style).
-        this.connectLiveStream();
+        // Set up leader election FIRST (startLiveQuotePolling sets _isLeaderTab/_passiveTab atomically).
+        // connectLiveStream + WS subscribe + candle fetch happen ONLY for the leader tab — prevents
+        // the "3 tabs all hammer Angel at once" WAF-storm root cause.
         this.startLiveQuotePolling();
+        // Note: connectLiveStream / WS subscribe / candle fetch are triggered inside startLiveQuotePolling
+        // after the startup stagger + leader election completes, OR when focus is gained.
         // INSTANT chart from localStorage cache (TradingView-style — zero delay)
         try {
             const cached = this.dataFeed._loadLocalCache(this.activeSymbol, this.activeTimeframe);
@@ -92,13 +93,20 @@ class App {
         await new Promise(resolve => {
             const done = () => { this._initCandleWait=null; resolve(); };
             this._initCandleWait = done;
-            setTimeout(done, 8000);  // 8s warmup after WS up (Angel cold-session bug needs 5-10s gate before first historical call)
+            // Wait is handled inside leader election callback; this is just a safety fallback
+            setTimeout(done, 12000);
         });
-        await this.loadChartData(this.activeSymbol, this.activeTimeframe, { firstLoad: true });
+        // If leader election already fired loadChartData this is a no-op; safety net only.
+        if (this._isLeaderTab && this._candlesLoaded !== true) {
+            await this.loadChartData(this.activeSymbol, this.activeTimeframe, { firstLoad: true });
+        }
     }
 
     // --------------- LIVE WS (SSE) ---------------
     connectLiveStream() {
+        // Passive tabs / pre-election tabs NEVER open their own SSE/WS (would duplicate streams and hit WAF).
+        // isLeaderTab is ONLY true AFTER the leader election completes (setTimeout(0-700ms) in startLiveQuotePolling).
+        if (this._passiveTab || this._isLeaderTab === false) return;
         const symKey = `${this.activeExchange}:${this.activeToken}`;
         const fullKey = `${symKey}:${this.activeTimeframe}`;
 
@@ -477,29 +485,32 @@ class App {
         const wsOn = this.liveWsConnected;
         const calReason = (this.calendarReason || '').toUpperCase();
         const holidayMode = this.isHoliday || calReason.includes('HOLIDAY') || calReason.includes('WEEKEND') || calReason.includes('CLOSED');
-        this.isLiveConnected = !!status && this.marketOpen && !holidayMode;
-        this.source = sourceLabel || (status ? (wsOn ? 'AngelOne+WS' : 'AngelOne') : 'SimulatedPro');
+        const isPassive = sourceLabel === 'PassiveTab';
+        this.isLiveConnected = !!status && this.marketOpen && !holidayMode && !isPassive;
+        this.source = isPassive ? 'PassiveTab' : sourceLabel || (status ? (wsOn ? 'AngelOne+WS' : 'AngelOne') : 'SimulatedPro');
         const badge = document.getElementById('connBadge');
         const txt = document.getElementById('connText');
         const foot = document.getElementById('engineFooter');
         const dot = document.getElementById('connDot');
-        const live = !!status && this.marketOpen && !holidayMode;
+        const live = !!status && this.marketOpen && !holidayMode && !isPassive;
         const closed = (!!status && !this.marketOpen) || holidayMode;
         if (badge && txt) {
             badge.classList.remove('conn-live','conn-sim','conn-off');
-            if (live && wsOn) { badge.classList.add('conn-live'); txt.textContent = '⚡ LIVE TICKS'; }
+            if (isPassive)    { badge.classList.add('conn-sim'); txt.textContent = '◐ ANOTHER TAB ACTIVE'; }
+            else if (live && wsOn) { badge.classList.add('conn-live'); txt.textContent = '⚡ LIVE TICKS'; }
             else if (live)    { badge.classList.add('conn-live'); txt.textContent = 'LIVE ANGEL ONE'; }
             else if (closed)  { badge.classList.add('conn-off');  txt.textContent = 'MARKET CLOSED'; }
             else              { badge.classList.add('conn-sim');  txt.textContent = 'SIMULATED'; }
         }
         if (foot) {
-            const label = (wsOn && live) ? '⚡ WebSocket LIVE'
-                       : live           ? '🟢 Angel One REST'
-                       : closed         ? '🔴 Market Closed'
-                       :                  '🟡 Simulated Feed';
+            const label = isPassive       ? '◐ Passive — click here to take over'
+                        : (wsOn && live) ? '⚡ WebSocket LIVE'
+                        : live           ? '🟢 Angel One REST'
+                        : closed         ? '🔴 Market Closed'
+                        :                  '🟡 Simulated Feed';
             foot.textContent = `v2026.10 Engine • ${label} • ${this.source}`;
         }
-        if (dot) dot.className = (wsOn && live) ? 'dot-green' : closed ? 'dot-red' : 'dot-yellow';
+        if (dot) dot.className = isPassive ? 'dot-yellow' : (wsOn && live) ? 'dot-green' : closed ? 'dot-red' : 'dot-yellow';
     }
 
     refreshStatusBadge() {
@@ -540,6 +551,21 @@ class App {
         const label = tf === 'D' ? 'D' : `${tf}m`;
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
+
+        // Passive tab: do NOT make API calls — show cache only, defer to leader tab
+        if (this._isLeaderTab === false && !isFirstLoad) {
+            const cached = this.dataFeed._loadLocalCache(symbol, tf);
+            if (cached && cached.length >= 10) {
+                const sane = this._sanitizeCandles(cached, symbol);
+                this.tvBridge.setCandleData(sane);
+                requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(sane); });
+                const last = sane[sane.length-1];
+                this.lastLtp = last.close; this.prevClose = this._findDayOpen(sane, tf);
+                this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
+            }
+            this.setConnectionStatus(false, 'PassiveTab');
+            return;
+        }
 
         // ----- INSTANT CHART: TradingView-style — render localStorage cache FIRST (if exists & fresh)
         // but ONLY for the SAME symbol+tf as last visit (don't show INDHOTEL cache for IGIL).
@@ -601,12 +627,22 @@ class App {
         const haveSubstantial = candles && candles.length >= 30;
         const isFreshAngel = source === 'AngelOne';
         if (!candles || candles.length < 2) {
-            // No new data — retry, keep whatever is on screen
+            const inCooldown = cd && cd.cooldown;
             const el = document.getElementById('trendBiasResult');
-            if (el && !hadInstant) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
+            if (el && !hadInstant) {
+                el.textContent = inCooldown ? '⏳ Waiting for AngelOne (rate-limit cool-down)...' : '⏳ Loading candles...';
+                el.className = 'bias-badge bias-neutral';
+            }
             clearTimeout(this._retryLoadTimer);
             this._retryCount = (this._retryCount || 0) + 1;
-            const waitMs = Math.min(2000 * this._retryCount, 10000);
+            // If in cooldown, wait the full cooldown period (don't spam retries that will just 429 again)
+            let waitMs;
+            if (inCooldown && cd.retryAfterMs) {
+                waitMs = Math.min(cd.retryAfterMs + 500, 60000);
+                this._retryCount = 0;  // don't escalate backoff during cooldown wait
+            } else {
+                waitMs = Math.min(2000 * this._retryCount, 15000);
+            }
             this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf, { retry: true }), waitMs);
             return;
         }
@@ -968,20 +1004,120 @@ class App {
     }
     startLiveQuotePolling() {
         this._stopPolling();
-        // Single-tab lock via BroadcastChannel: only ONE tab polls/candles-fetches at a time
-        // (prevents the "4 tabs open = 4x API calls" problem).
+        // Aggressive single-tab leader election via BroadcastChannel:
+        //  - Tabs send periodic heartbeat with their random tab ID + timestamp
+        //  - Oldest (earliest claimed leader) stays leader
+        //  - Leader makes ALL candle/quote/WS calls; passive tabs read from localStorage
+        //    via a shared tick broadcast channel (future work). For now passive tabs show
+        //    last cached data with a "Passive tab — switch to this tab for live data" hint.
+        this._tabId = Math.random().toString(36).slice(2, 9);
+        this._isLeaderTab = false;  // start passive; claim leadership after lock acquisition
+        this._passiveTab = true;
         try {
-            this._tabChan = new BroadcastChannel('prochart-tabs');
+            this._tabChan = new BroadcastChannel('prochart-leader');
             this._tabChan.onmessage = (e) => {
-                if (e.data === 'active') {
-                    // Another tab became active — this one goes passive (no REST polls)
-                    this._passiveTab = true;
-                    if (this.pollingInterval) { clearTimeout(this.pollingInterval); this.pollingInterval = null; }
+                if (!e.data || !e.data.type) return;
+                const isClaim = e.data.type === 'claim' || e.data.type === 'heartbeat';
+                if (isClaim && e.data.id !== this._tabId) {
+                    // Yield if another live leader exists (has claimed recently, within 6s)
+                    const age = Date.now() - (e.data.ts || 0);
+                    if (age < 6000 && this._isLeaderTab && e.data.id !== this._tabId) {
+                        // Only yield if other tab is ALSO claiming leader (not just random)
+                        if (e.data.leader) {
+                            console.log(`🔀 Tab ${this._tabId} yielding to leader ${e.data.id}`);
+                            this._isLeaderTab = false; this._passiveTab = true;
+                            if (this.liveEventSource) { try { this.liveEventSource.close(); } catch(_){} this.liveEventSource=null; }
+                            if (this.pollingInterval) { clearTimeout(this.pollingInterval); this.pollingInterval=null; }
+                            try { fetch('/api/ws/unsubscribe',{method:'POST',cache:'no-store'}).catch(()=>{}); } catch(_){}
+                            this.setConnectionStatus(false, 'PassiveTab');
+                        }
+                    }
                 }
             };
-            this._tabChan.postMessage('active');
-            window.addEventListener('focus', () => { this._passiveTab = false; if (this._tabChan) this._tabChan.postMessage('active'); });
-        } catch(e) {}
+            // Atomic leader lock via localStorage: winner is whichever tab writes the lock first.
+            // Random startup stagger (0-800ms) + lock check prevents all-3-tabs-writing-at-once race.
+            const _acquireLeader = () => {
+                const LOCK_KEY = 'prochart_leader_lock';
+                const now = Date.now();
+                let lock = null;
+                try { lock = JSON.parse(localStorage.getItem(LOCK_KEY) || 'null'); } catch(_){}
+                const lockAge = lock ? (now - (lock.ts || 0)) : 999999;
+                // Stale lock (>7s old = dead tab) — claim it
+                if (!lock || lockAge > 7000 || lock.id === this._tabId) {
+                    this._claimedAt = now;
+                    this._isLeaderTab = true; this._passiveTab = false;
+                    localStorage.setItem(LOCK_KEY, JSON.stringify({id:this._tabId, ts:now}));
+                } else {
+                    this._isLeaderTab = false; this._passiveTab = true;
+                    this.setConnectionStatus(false, 'PassiveTab');
+                }
+            };
+            // Stagger startup 0-700ms so tabs don't race lock on simultaneous load
+            const _startDelay = Math.floor(Math.random() * 700);
+            setTimeout(() => {
+                _acquireLeader();
+                // If we won leadership, open WS/SSE and fire initial fetch
+                if (this._isLeaderTab) {
+                    if (this._tabChan) this._tabChan.postMessage({type:'claim', id:this._tabId, ts:this._claimedAt, leader:true});
+                    this.connectLiveStream();
+                    // Staggered candle fetch — give WS 3s to establish
+                    setTimeout(() => {
+                        this.loadChartData(this.activeSymbol, this.activeTimeframe, { firstLoad: true });
+                    }, 3000);
+                } else {
+                    this.setConnectionStatus(false, 'PassiveTab');
+                    // Try reading cache immediately for the passive tab overlay
+                    try {
+                        const cached = this.dataFeed._loadLocalCache(this.activeSymbol, this.activeTimeframe);
+                        if (cached && cached.length) {
+                            const sane = this._sanitizeCandles(cached, this.activeSymbol);
+                            this.tvBridge.setCandleData(sane);
+                            requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(sane); });
+                            const last = sane[sane.length-1];
+                            this.lastLtp = last.close; this.prevClose = this._findDayOpen(sane, this.activeTimeframe);
+                            this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
+                        }
+                    } catch(_){}
+                }
+                // Heartbeat every 3s — refresh localStorage lock + BC ping
+                this._hbTimer = setInterval(() => {
+                    const LK = 'prochart_leader_lock';
+                    const now2 = Date.now();
+                    if (this._isLeaderTab) {
+                        localStorage.setItem(LK, JSON.stringify({id:this._tabId, ts:now2}));
+                        try { this._tabChan.postMessage({type:'heartbeat', id:this._tabId, ts:now2, leader:true}); } catch(_){}
+                    } else {
+                        // Check if leader died (no heartbeat for >7s) — take over
+                        let lk = null;
+                        try { lk = JSON.parse(localStorage.getItem(LK) || 'null'); } catch(_){}
+                        if (!lk || (now2 - (lk.ts||0)) > 7000) {
+                            console.log(`👑 Tab ${this._tabId} taking over leadership (old leader dead)`);
+                            _acquireLeader();
+                            if (this._isLeaderTab) {
+                                this.connectLiveStream();
+                                this.loadChartData(this.activeSymbol, this.activeTimeframe, {retry:true});
+                            }
+                        }
+                    }
+                }, 3000);
+            }, _startDelay);
+
+            window.addEventListener('focus', () => {
+                // Focus gain → force-take leadership (user is looking at this tab)
+                this._passiveTab = false; this._isLeaderTab = true; this._claimedAt = Date.now();
+                localStorage.setItem('prochart_leader_lock', JSON.stringify({id:this._tabId, ts:Date.now()}));
+                try { this._tabChan.postMessage({type:'claim', id:this._tabId, ts:this._claimedAt, leader:true}); } catch(_){}
+                this.connectLiveStream();
+                this.loadChartData(this.activeSymbol, this.activeTimeframe, { retry: true });
+            });
+            // Release lock on unload
+            window.addEventListener('beforeunload', () => {
+                try {
+                    const lk = JSON.parse(localStorage.getItem('prochart_leader_lock')||'null');
+                    if (lk && lk.id === this._tabId) localStorage.removeItem('prochart_leader_lock');
+                } catch(_){}
+            });
+        } catch(e) { this._isLeaderTab = true; this._passiveTab = false; /* fallback if BC unavailable */ }
 
         // Global singleton guard (prevents 2 App instances polling after dev reload)
         if (window.__prochartPoller && window.__prochartPoller !== this) {

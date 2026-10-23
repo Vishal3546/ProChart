@@ -311,7 +311,7 @@ CANDLE_TTL = 60.0        # candle cache TTL (1 minute — very conservative for 
 RATE_LIMIT_BACKOFF = 300 # 5 minutes after first hit
 _inflight_candle = {}    # per cache_key: single-flight guard
 _last_candle_req = None  # monotonic timestamp of last Angel candle call (global throttle)
-GLOBAL_CANDLE_GAP = 1.0  # MINIMUM 1 second between any two Angel historical calls (Angel allows 3/sec ≈333ms; we stay at 1s for safety buffer)
+GLOBAL_CANDLE_GAP = 2.5  # MINIMUM 2.5 seconds between any two Angel historical calls (Angel allows ~3/sec; heavy safety buffer to avoid WAF)
 rate_limited_candles = {}
 rate_limited_quotes = {}
 _last_quote_req = 0.0    # global throttle for quote REST
@@ -802,13 +802,27 @@ async def get_candles(
             except (ValueError, TypeError, IndexError):
                 continue
 
+    # --- Price-sanity check: if WS has a recent LTP, last candle must be within ±30% of it
+    # (catches stale cached Angel data / WAF HTML pages parsed as 200 OK / corrupted responses)
+    if candles and market_open:
+        try:
+            ws_ltp = live_ws.ltp(exchange, str(token))
+            last_close = candles[-1]["close"]
+            if ws_ltp and ws_ltp > 0:
+                ratio = last_close / ws_ltp
+                if ratio < 0.70 or ratio > 1.30:
+                    print(f"⚠️ Sanity REJECT for {cache_key}: last close {last_close} vs WS LTP {ws_ltp} ({(ratio-1)*100:+.1f}%) — dropping, falling back to simulated")
+                    candles = []  # force fallback (cooldown not set; next retry will hit Angel again)
+        except Exception as _e:
+            pass
+
     if candles:
         out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
         candle_cache[cache_key] = (mono, out)
         cache_cleanup()
         return _merge_live_candle(out, exchange, token, interval, market_open)
 
-    # --- 7. Parse successful Angel response ---
+    # --- 7. (dead code kept for safety — candles_raw path already returned above) ---
     candles = []
     if data and isinstance(data, dict) and data.get("status") and data.get("data"):
         for c in data["data"]:
@@ -825,16 +839,27 @@ async def get_candles(
                 continue
 
     if candles:
+        # Same sanity check on fallback parse path
+        try:
+            ws_ltp2 = live_ws.ltp(exchange, str(token))
+            lc2 = candles[-1]["close"]
+            if ws_ltp2 and ws_ltp2 > 0:
+                r2 = lc2 / ws_ltp2
+                if r2 < 0.70 or r2 > 1.30:
+                    print(f"⚠️ Sanity REJECT (path 2) for {cache_key}: last {lc2} vs LTP {ws_ltp2}")
+                    candles = []
+        except Exception: pass
+    if candles:
         out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
         candle_cache[cache_key] = (mono, out)
         cache_cleanup()
         return _merge_live_candle(out, exchange, token, interval, market_open)
 
     # --- 8. Fallback: simulated response anchored to LTP/known base (never fake NIFTY data) ---
+    # CRITICAL: NEVER cache simulated/cooldown/inflight in memory. Caching fake data caused the
+    # bug where subsequent requests (retry/other tab) got fake candles as "AngelOne" and wrote
+    # them to localStorage → chart shows stale 308-322 range even though header LTP is 359.
     out = _simulated_response(symbol, token, exchange, interval, market_open)
-    if out["candles"]:
-        candle_cache[cache_key] = (mono, out)
-        cache_cleanup()
     return _merge_live_candle(out, exchange, token, interval, market_open)
 
 
