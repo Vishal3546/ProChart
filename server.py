@@ -309,7 +309,7 @@ QUOTE_TTL = 8.0          # quote cache TTL (seconds) — 8s is plenty for LTP di
 MAX_CONCURRENT_SSE = 2   # hard cap on concurrent SSE streams (kills stale tabs)
 CANDLE_TTL = 60.0        # candle cache TTL (1 minute — very conservative for Angel)
 RATE_LIMIT_BACKOFF = 300 # 5 minutes after first hit
-_inflight_candle = {}    # per cache_key: single-flight guard
+_inflight_candle = {}    # per cache_key: asyncio.Future (single-flight — await concurrent callers on first result)
 _last_candle_req = None  # monotonic timestamp of last Angel candle call (global throttle)
 GLOBAL_CANDLE_GAP = 3.5  # MINIMUM 3.5s between Angel historical calls (heavy safety against WAF; Angel allows ~3/sec)
 rate_limited_candles = {}
@@ -709,11 +709,23 @@ async def get_candles(
         # Simulated here would anchor to random/wrong base price and cause "316 range" bug.
         return {"status":"success","source":"Cooldown","candles":[],"market_open":market_open,"loading":True,"cooldown":True,"retry_after":retry_after}
 
-    # --- 3. Single-flight dedup ---
+    # --- 3. Single-flight dedup (PROPER async wait — real fix for concurrent-request storm) ---
+    loop = asyncio.get_running_loop()
     if cache_key in _inflight_candle:
+        fut = _inflight_candle[cache_key]
+        if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
+            return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
+        try:
+            # Wait for the in-flight request to finish, then return its result (or cached result)
+            await asyncio.wait_for(fut, timeout=15.0)
+        except Exception:
+            pass
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
         return {"status":"success","source":"InFlight","candles":[],"market_open":market_open,"loading":True}
+
+    _my_fut = loop.create_future()
+    _inflight_candle[cache_key] = _my_fut
 
     # --- 4. Global throttle: MIN 3s gap between ANY two Angel historical calls ---
     global _last_candle_req
@@ -804,81 +816,83 @@ async def get_candles(
 
     _inflight_candle.pop(cache_key, None)
 
-    # --- 6. Parse successful response ---
-    candles = []
-    if candles_raw:
-        for c in candles_raw:
+    try:
+        # --- 6. Parse successful response ---
+        candles = []
+        if candles_raw:
+            for c in candles_raw:
+                try:
+                    if len(c) < 5: continue
+                    if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
+                    o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                    if not (o and h and l and cl): continue
+                    if h < l or o <= 0 or cl <= 0: continue
+                    dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                    vol = int(c[5]) if len(c) > 5 and c[5] else 0
+                    candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
+                except (ValueError, TypeError, IndexError):
+                    continue
+
+        # Price-sanity check: if WS has a recent LTP, last candle must be within ±30% of it
+        if candles and market_open:
             try:
-                if len(c) < 5: continue
-                if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
-                o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
-                if not (o and h and l and cl): continue
-                if h < l or o <= 0 or cl <= 0: continue
-                dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
-                vol = int(c[5]) if len(c) > 5 and c[5] else 0
-                candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
-            except (ValueError, TypeError, IndexError):
-                continue
+                ws_ltp = live_ws.ltp(exchange, str(token))
+                last_close = candles[-1]["close"]
+                if ws_ltp and ws_ltp > 0:
+                    ratio = last_close / ws_ltp
+                    if ratio < 0.70 or ratio > 1.30:
+                        print(f"⚠️ Sanity REJECT for {cache_key}: last close {last_close} vs WS LTP {ws_ltp} ({(ratio-1)*100:+.1f}%) — dropping")
+                        candles = []
+            except Exception:
+                pass
 
-    # --- Price-sanity check: if WS has a recent LTP, last candle must be within ±30% of it
-    # (catches stale cached Angel data / WAF HTML pages parsed as 200 OK / corrupted responses)
-    if candles and market_open:
-        try:
-            ws_ltp = live_ws.ltp(exchange, str(token))
-            last_close = candles[-1]["close"]
-            if ws_ltp and ws_ltp > 0:
-                ratio = last_close / ws_ltp
-                if ratio < 0.70 or ratio > 1.30:
-                    print(f"⚠️ Sanity REJECT for {cache_key}: last close {last_close} vs WS LTP {ws_ltp} ({(ratio-1)*100:+.1f}%) — dropping, falling back to simulated")
-                    candles = []  # force fallback (cooldown not set; next retry will hit Angel again)
-        except Exception as _e:
-            pass
+        if candles:
+            out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
+            candle_cache[cache_key] = (mono, out)
+            cache_cleanup()
+            _my_fut.set_result(True)
+            return _merge_live_candle(out, exchange, token, interval, market_open)
 
-    if candles:
-        out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
-        candle_cache[cache_key] = (mono, out)
-        cache_cleanup()
-        return _merge_live_candle(out, exchange, token, interval, market_open)
+        # --- 7. Fallback parse path ---
+        candles = []
+        if data and isinstance(data, dict) and data.get("status") and data.get("data"):
+            for c in data["data"]:
+                try:
+                    if len(c) < 5: continue
+                    if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
+                    o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                    if not (o and h and l and cl): continue
+                    if h < l or o <= 0 or cl <= 0: continue
+                    dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
+                    vol = int(c[5]) if len(c) > 5 and c[5] else 0
+                    candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
+                except (ValueError, TypeError, IndexError):
+                    continue
 
-    # --- 7. (dead code kept for safety — candles_raw path already returned above) ---
-    candles = []
-    if data and isinstance(data, dict) and data.get("status") and data.get("data"):
-        for c in data["data"]:
+        if candles:
             try:
-                if len(c) < 5: continue
-                if c[1] is None or c[2] is None or c[3] is None or c[4] is None: continue
-                o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
-                if not (o and h and l and cl): continue
-                if h < l or o <= 0 or cl <= 0: continue
-                dt = datetime.strptime(c[0][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=IST)
-                vol = int(c[5]) if len(c) > 5 and c[5] else 0
-                candles.append({"time": int(dt.timestamp()),"open":o,"high":h,"low":l,"close":cl,"volume":vol})
-            except (ValueError, TypeError, IndexError):
-                continue
+                ws_ltp2 = live_ws.ltp(exchange, str(token))
+                lc2 = candles[-1]["close"]
+                if ws_ltp2 and ws_ltp2 > 0:
+                    r2 = lc2 / ws_ltp2
+                    if r2 < 0.70 or r2 > 1.30:
+                        print(f"⚠️ Sanity REJECT (path 2) for {cache_key}: last {lc2} vs LTP {ws_ltp2}")
+                        candles = []
+            except Exception: pass
+        if candles:
+            out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
+            candle_cache[cache_key] = (mono, out)
+            cache_cleanup()
+            _my_fut.set_result(True)
+            return _merge_live_candle(out, exchange, token, interval, market_open)
 
-    if candles:
-        # Same sanity check on fallback parse path
-        try:
-            ws_ltp2 = live_ws.ltp(exchange, str(token))
-            lc2 = candles[-1]["close"]
-            if ws_ltp2 and ws_ltp2 > 0:
-                r2 = lc2 / ws_ltp2
-                if r2 < 0.70 or r2 > 1.30:
-                    print(f"⚠️ Sanity REJECT (path 2) for {cache_key}: last {lc2} vs LTP {ws_ltp2}")
-                    candles = []
-        except Exception: pass
-    if candles:
-        out = {"status":"success","source":"AngelOne","candles":candles,"market_open":market_open}
-        candle_cache[cache_key] = (mono, out)
-        cache_cleanup()
+        # --- 8. Fallback: simulated response (NEVER cached) ---
+        out = _simulated_response(symbol, token, exchange, interval, market_open)
+        if not _my_fut.done(): _my_fut.set_result(False)
         return _merge_live_candle(out, exchange, token, interval, market_open)
-
-    # --- 8. Fallback: simulated response anchored to LTP/known base (never fake NIFTY data) ---
-    # CRITICAL: NEVER cache simulated/cooldown/inflight in memory. Caching fake data caused the
-    # bug where subsequent requests (retry/other tab) got fake candles as "AngelOne" and wrote
-    # them to localStorage → chart shows stale 308-322 range even though header LTP is 359.
-    out = _simulated_response(symbol, token, exchange, interval, market_open)
-    return _merge_live_candle(out, exchange, token, interval, market_open)
+    except Exception as _e:
+        if not _my_fut.done(): _my_fut.set_exception(_e)
+        raise
 
 
 

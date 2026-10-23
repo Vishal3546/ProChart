@@ -649,6 +649,7 @@ class App {
         // Render fresh data ALWAYS when AngelOne, or when nothing is shown yet
         if (isFreshAngel || haveSubstantial || !hadInstant) {
             this.tvBridge.setCandleData(candles);
+            this._candlesLoaded = true;
             requestAnimationFrame(() => {
                 this.applyIndicators();
                 this.runAllAnalytics(candles);
