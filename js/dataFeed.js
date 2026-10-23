@@ -15,6 +15,8 @@ class DataFeed {
         this._candleCooldownUntil = 0;     // global cooldown ms timestamp
         this._perKeyCooldown = new Map();  // per-cacheKey cooldown until ms timestamp
         this._candleAbort = new Map();     // per-key AbortController
+        this._localCache = new Map();      // in-memory RAM cache (key -> candles)
+        this._purged = false;
         // Purge old-version caches immediately on startup
         this._purgeOldCaches && this._purgeOldCaches();
     }
@@ -57,13 +59,36 @@ class DataFeed {
         const exchange = meta.exchange || 'NSE';
         const cKey = `${exchange}:${token}:${timeframe}`;
 
+        // 1. Check local RAM cache first (0ms)
+        let cached = this._loadLocalCache(symbol, timeframe);
+        if (!cached && window.idbCache) {
+            // 2. Check IndexedDB async store if RAM missed
+            try {
+                const idbData = await window.idbCache.get(symbol, timeframe);
+                if (idbData && idbData.length >= 20) {
+                    cached = this.formatCandles(idbData);
+                    const key = `${symbol}_${timeframe}`;
+                    this._localCache.set(key, cached);
+                }
+            } catch (e) {}
+        }
+
         const now = Date.now();
         // Respect PER-KEY cooldown (server told us this exact key is rate-limited — don't hammer)
         const pkUntil = this._perKeyCooldown.get(cKey) || 0;
         const cdMs = Math.max(0, this._candleCooldownUntil - now, pkUntil - now);
         if (cdMs > 500) {
-            const cached = this._loadLocalCache(symbol, timeframe);
             if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
+            // Double check IDB if RAM was empty during cooldown
+            if (window.idbCache) {
+                try {
+                    const idbCandles = await window.idbCache.get(symbol, timeframe);
+                    if (idbCandles && idbCandles.length) {
+                        const fc = this.formatCandles(idbCandles);
+                        return { candles: fc, source: 'IDBCache', stale: true, cooldown: true };
+                    }
+                } catch (e) {}
+            }
             return { candles: [], source: 'Cooldown', loading: true, cooldown: true, retryAfterMs: cdMs };
         }
 
@@ -94,8 +119,19 @@ class DataFeed {
                     // Set both global + per-key cooldown to be safe
                     this._perKeyCooldown.set(cKey, Date.now() + retry * 1000);
                     console.warn(`Candle 429 — cooling down ${retry}s for ${cKey}`);
-                    const cached = this._loadLocalCache(symbol, timeframe);
+                    // Try RAM/localStorage first
+                    cached = cached || this._loadLocalCache(symbol, timeframe);
                     if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
+                    // Fall back to IndexedDB on cooldown (blank chart prevention)
+                    if (window.idbCache) {
+                        try {
+                            const idbCandles = await window.idbCache.get(symbol, timeframe);
+                            if (idbCandles && idbCandles.length) {
+                                const fc = this.formatCandles(idbCandles);
+                                return { candles: fc, source: 'IDBCache', stale: true, cooldown: true };
+                            }
+                        } catch (e) {}
+                    }
                     return { candles: [], source: 'Cooldown', loading: true, cooldown: true, retryAfterMs: retry*1000 };
                 }
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -108,23 +144,7 @@ class DataFeed {
                 if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0 && !isFake) {
                     let candles = this.formatCandles(data.candles);
 
-                    // Corporate action adjustment (split/bonus/dividend safety net)
-                    try {
-                        if (window.corporateActions && candles.length) {
-                            const sus = window.corporateActions.detectUnadjustedSplit(candles);
-                            if (sus) console.warn('[CorporateActions] Possible unregistered split', symbol, sus);
-                            candles = window.corporateActions.adjust(symbol, candles);
-                        }
-                    } catch(_) {}
-
-                    // Async dual-write to IndexedDB (fire-and-forget — UI never waits)
-                    try {
-                        if (window.idbCache && candles.length) {
-                            window.idbCache.set(symbol, timeframe, candles).catch(() => {});
-                        }
-                    } catch(_) {}
-
-                    // Price-divergence sanity: don't save to localStorage if last candle is >25% off known LTP
+                    // Price-divergence sanity: don't save to cache if last candle is >25% off known LTP
                     // (defense in depth — server already does this check too)
                     let sane = true;
                     try {
@@ -145,19 +165,19 @@ class DataFeed {
                 if (isFake) {
                     // Server sent fake/cooldown/inflight — set per-key cooldown to prevent retries hammering
                     if (data.source === 'Cooldown') this._perKeyCooldown.set(cKey, Date.now() + 30000);
-                    const cached = this._loadLocalCache(symbol, timeframe);
+                    cached = cached || this._loadLocalCache(symbol, timeframe);
                     if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                     return { candles: [], source: data.source, loading: true, cooldown: data.source === 'Cooldown' };
                 }
                 // Empty success or other: fall back to cache
-                const cached = this._loadLocalCache(symbol, timeframe);
+                cached = cached || this._loadLocalCache(symbol, timeframe);
                 if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                 return { candles: [], source: 'empty', loading: true };
             } catch (err) {
                 if (err && err.name === 'AbortError') { throw err; }
                 console.warn('API candle fetch failed:', err.message);
                 // NO FAKE CANDLES! Use Cache or Return Empty
-                const cached = this._loadLocalCache(symbol, timeframe);
+                cached = cached || this._loadLocalCache(symbol, timeframe);
                 if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                 return { candles: [], source: 'Error', loading: false };
             } finally {
@@ -195,15 +215,43 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v38'; }
+    _cacheVersion() { return 'v39'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
+        if (!candles || !candles.length) return;
+
+        // 1. Corporate Actions Adjustment (Splits / Bonus / Dividends)
+        let adjusted = candles;
         try {
-            const trimmed = candles.slice(-500);
-            localStorage.setItem(this._cacheKey(symbol, tf), JSON.stringify({ t: Date.now(), c: trimmed }));
+            if (window.corporateActions) {
+                const sus = window.corporateActions.detectUnadjustedSplit(candles);
+                if (sus) console.warn('[CorporateActions] Possible unregistered split for', symbol, sus);
+                adjusted = window.corporateActions.adjust(symbol, candles);
+            }
+        } catch (_) {}
+
+        // 2. In-memory RAM cache (instant, existing behaviour)
+        const key = `${symbol}_${tf}`;
+        this._localCache.set(key, adjusted);
+
+        // 3. Async IndexedDB Write (Multi-GB persistent store, 0ms main thread block)
+        try {
+            if (window.idbCache) {
+                window.idbCache.set(symbol, tf, adjusted).catch(() => {});
+            }
+        } catch (_) {}
+
+        // 4. Synchronous LocalStorage Fallback (trim to 500 bars — browser ~5MB cap)
+        try {
+            localStorage.setItem(this._cacheKey(symbol, tf), JSON.stringify({ t: Date.now(), c: adjusted.slice(-500) }));
         } catch(e) {}
     }
     _loadLocalCache(symbol, tf) {
+        // 1) In-memory RAM cache (instant hit)
+        const key = `${symbol}_${tf}`;
+        const mem = this._localCache.get(key);
+        if (mem && mem.length) return mem;
+        // 2) localStorage (versioned)
         try {
             // Also wipe ANY old-format (non-versioned) caches on sight — prevents stale
             // simulated data from previous versions from leaking onto charts.
@@ -215,7 +263,9 @@ class DataFeed {
             const age = Date.now() - (obj.t || 0);
             const maxAge = tf === 'D' ? 7*86400*1000 : 8*3600*1000;
             if (age > maxAge) return null;
-            return this.formatCandles(obj.c);
+            const parsed = this.formatCandles(obj.c);
+            if (parsed && parsed.length) this._localCache.set(key, parsed); // promote to RAM
+            return parsed;
         } catch(e) { return null; }
     }
     _purgeOldCaches() {

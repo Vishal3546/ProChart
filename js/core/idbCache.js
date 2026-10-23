@@ -4,7 +4,7 @@
  * Versioned keys, non-blocking, multi-symbol safe
  * ============================================================ */
 const IDB_NAME = 'ProChartTerminal';
-const IDB_VER = 3;
+const IDB_VER = 4;
 const STORE = 'candles';
 const META_STORE = 'meta';
 const MAX_RAM_ENTRIES = 24; // hot LRU
@@ -46,7 +46,9 @@ class IDBCache {
     }
 
     _key(symbol, tf) {
-        return `v37:${symbol}:${tf}`;
+        // Sync with DataFeed cache version — bumps auto-purge old IDB entries on version upgrade
+        const ver = (window.dataFeed && window.dataFeed._cacheVersion && window.dataFeed._cacheVersion()) || 'v39';
+        return `${ver}:${symbol}:${tf}`;
     }
 
     async get(symbol, tf) {
