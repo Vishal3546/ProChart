@@ -9,10 +9,17 @@ class BreakoutChecklistEngine {
         }
         const n = candles.length;
         const c = candles[n - 1];
-        const closes = candles.map(k => k.close);
-        const highs = candles.map(k => k.high);
-        const lows  = candles.map(k => k.low);
-        const vols  = candles.map(k => k.volume || 0);
+        // 🚀 TypedArrays (C++ style memory allocation)
+        const closes = new Float64Array(n);
+        const highs  = new Float64Array(n);
+        const lows   = new Float64Array(n);
+        const vols   = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            closes[i] = candles[i].close;
+            highs[i]  = candles[i].high;
+            lows[i]   = candles[i].low;
+            vols[i]   = candles[i].volume || 0;
+        }
 
         const ema20  = TechnicalIndicators.EMA(candles, 20) || [];
         const ema50  = TechnicalIndicators.EMA(candles, 50) || [];

@@ -9,9 +9,15 @@ class FlagPatternEngine {
             return { detected: false, label: '—', level: 'muted', dir: null };
         }
         const n = candles.length;
-        const closes = candles.map(c => c.close);
-        const highs = candles.map(c => c.high);
-        const lows = candles.map(c => c.low);
+        // 🚀 TypedArrays (Zero Garbage Collection pause)
+        const closes = new Float64Array(n);
+        const highs  = new Float64Array(n);
+        const lows   = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            closes[i] = candles[i].close;
+            highs[i]  = candles[i].high;
+            lows[i]   = candles[i].low;
+        }
         const atrArr = TechnicalIndicators.ATR(candles, 14) || [];
         const lastAtr = atrArr[atrArr.length - 1];
         const curAtr = (typeof lastAtr === 'object' && lastAtr !== null) ? lastAtr.value : lastAtr;

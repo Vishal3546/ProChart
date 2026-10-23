@@ -11,10 +11,17 @@ class DoubleBottomEngine {
             return { detected: false, pattern: null, label: '—', level: 'muted' };
         }
         const n = candles.length;
-        const closes = candles.map(c => c.close);
-        const highs  = candles.map(c => c.high);
-        const lows   = candles.map(c => c.low);
-        const vols   = candles.map(c => c.volume || 0);
+        // 🚀 TypedArrays (Zero Garbage Collection pause — hardware-level speed)
+        const closes = new Float64Array(n);
+        const highs  = new Float64Array(n);
+        const lows   = new Float64Array(n);
+        const vols   = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            closes[i] = candles[i].close;
+            highs[i]  = candles[i].high;
+            lows[i]   = candles[i].low;
+            vols[i]   = candles[i].volume || 0;
+        }
 
         // Find swing lows over last 60 bars (asymmetric window near current bar)
         const lows_arr = [];

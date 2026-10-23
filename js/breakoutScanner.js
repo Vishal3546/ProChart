@@ -25,10 +25,17 @@ class BreakoutScanner {
         if (!candles || candles.length < 30) return def;
 
         const n = candles.length;
-        const closes = candles.map(c => c.close);
-        const highs = candles.map(c => c.high);
-        const lows = candles.map(c => c.low);
-        const vols = candles.map(c => c.volume || 0);
+        // 🚀 TypedArrays (C++ style memory allocation for extreme speed, zero GC pause)
+        const closes = new Float64Array(n);
+        const highs  = new Float64Array(n);
+        const lows   = new Float64Array(n);
+        const vols   = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            closes[i] = candles[i].close;
+            highs[i]  = candles[i].high;
+            lows[i]   = candles[i].low;
+            vols[i]   = candles[i].volume || 0;
+        }
         const last = candles[n - 1];
         const body = last.close - last.open;
         const range = last.high - last.low;
