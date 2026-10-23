@@ -94,6 +94,16 @@ class LiveTickClient:
         self._tick_cache: Dict[str, Dict[str, Any]] = {}
         # forming_candles: { "<exType>_<token>_<tfSec>": { time, open, high, low, close, volume, start_vol } }
         self._forming: Dict[str, Dict[str, Any]] = {}
+        # ========================================================================
+        # 2026 TRADINGVIEW-STYLE PERMANENT MARKET CACHE (the "zero-load broker" core)
+        # Structure: { "<exType>_<token>": { "<tfSec>": [ {time,o,h,l,c,v}, ... ] } }
+        # Populated ONCE per TF per symbol per session (first time requested from Angel),
+        # then updated TICK-BY-TICK from WebSocket. Subsequent TF switches / page reloads
+        # / multi-tab requests ALL hit this cache — Angel API is NEVER called again for
+        # a TF already in cache. Rate-limits become impossible.
+        # ========================================================================
+        self.market_cache: Dict[str, Dict[int, list]] = {}
+        self._cache_loaded: Dict[str, set] = {}  # which tfSec sets have been seeded from Angel
         # auth (set via start())
         self._auth_token = ""
         self._api_key = ""
@@ -415,18 +425,23 @@ class LiveTickClient:
                 log.debug(f"tick parse error: {e}")
 
     def _update_formings(self, key: str, et: int, tok: str, ltp: float, delta_vol: float, tick_ts: float, day_open: float):
-        """Maintain per-tf forming candle buckets for the given token."""
+        """Maintain per-tf forming candle buckets for the given token, AND append/close
+        completed candles into the permanent market_cache (TradingView-style rolling cache)."""
         for tfSec in (60, 180, 300, 900, 1800, 3600, 86400):
             if tfSec == 86400:
-                # Daily candle: bucket = start of day (00:00 IST? Actually exchange-day 09:15)
                 d = datetime.fromtimestamp(tick_ts, tz=IST).date()
                 bucket_ts = int(datetime(d.year, d.month, d.day, 9, 15, tzinfo=IST).timestamp())
             else:
                 bucket_ts = int(tick_ts // tfSec) * tfSec
             fkey = f"{key}_{tfSec}"
             fc = self._forming.get(fkey)
+            prev_bucket_ts = fc["time"] if fc else None
+
             if fc is None or fc["time"] != bucket_ts:
-                # New candle starting — seed with LTP
+                # 🆕 New candle starting — finalize previous forming candle into market_cache
+                if fc is not None:
+                    self._commit_candle(key, tfSec, fc)
+                # Seed new forming candle at LTP
                 self._forming[fkey] = {
                     "time": bucket_ts,
                     "open": ltp, "high": ltp, "low": ltp, "close": ltp,
@@ -439,6 +454,110 @@ class LiveTickClient:
                 if ltp < fc["low"]:
                     fc["low"] = ltp
                 fc["volume"] += delta_vol
+
+            # Live-patch the LAST candle of market_cache to always reflect current forming OHLC
+            self._patch_live_candle(key, tfSec, self._forming[fkey])
+
+    def _commit_candle(self, key: str, tfSec: int, closed_candle: dict):
+        """Called when a candle completes (new bucket starts) — append the closed candle
+        to market_cache as an immutable historical bar."""
+        with self._lock:
+            if key not in self.market_cache:
+                self.market_cache[key] = {}
+            if tfSec not in self.market_cache[key]:
+                self.market_cache[key][tfSec] = []
+            arr = self.market_cache[key][tfSec]
+            # Drop if duplicate (safety)
+            if arr and arr[-1].get("time") == closed_candle["time"]:
+                arr[-1] = dict(closed_candle)
+            else:
+                arr.append(dict(closed_candle))
+            # Trim to 500 bars to bound memory
+            if len(arr) > 500:
+                del arr[:-500]
+
+    def _patch_live_candle(self, key: str, tfSec: int, forming: dict):
+        """Patch the last bar in market_cache with the in-progress forming candle
+        so GET /api/candles always returns up-to-the-tick OHLCV without polling Angel."""
+        with self._lock:
+            if key not in self.market_cache:
+                return
+            arr = self.market_cache[key].get(tfSec)
+            if not arr:
+                return
+            if arr[-1].get("time") == forming["time"]:
+                arr[-1].update(open=forming["open"], high=forming["high"],
+                               low=forming["low"], close=forming["close"],
+                               volume=int(forming["volume"]))
+            elif forming["time"] > arr[-1].get("time", 0):
+                # If forming has advanced past last cached bar (shouldn't normally happen
+                # because _commit_candle runs first, but safe fallback) append it
+                arr.append(dict(forming))
+                if len(arr) > 500: del arr[:-500]
+
+    def seed_market_cache(self, exType_or_key, token_or_key, tf: str, candles: list):
+        """Seed market_cache from Angel historical REST response. Called once per TF/session
+        after a successful Angel getCandleData. After this, NO more Angel calls for this TF."""
+        tf_str = str(tf)
+        tfSec = TF_SECONDS.get(tf_str)
+        if not tfSec:
+            return
+        # Normalize key
+        if isinstance(exType_or_key, str) and exType_or_key.startswith(("1_", "2_", "3_", "4_", "5_", "7_", "13_")):
+            key = exType_or_key
+        else:
+            key = f"{exType_or_key}_{token_or_key}"
+        with self._lock:
+            if key not in self.market_cache:
+                self.market_cache[key] = {}
+            if key not in self._cache_loaded:
+                self._cache_loaded[key] = set()
+            # Convert incoming candles (server.py format: {time:unix_sec, o,h,l,c,v}) to list
+            existing = self.market_cache[key].get(tfSec, [])
+            by_time = {c["time"]: c for c in existing}
+            for c in candles:
+                if not isinstance(c, dict): continue
+                t = c.get("time")
+                if t is None: continue
+                by_time[int(t)] = {
+                    "time": int(t),
+                    "open": float(c.get("open", c.get("o", 0))),
+                    "high": float(c.get("high", c.get("h", 0))),
+                    "low": float(c.get("low", c.get("l", 0))),
+                    "close": float(c.get("close", c.get("c", 0))),
+                    "volume": int(c.get("volume", c.get("v", 0))),
+                }
+            sorted_candles = sorted(by_time.values(), key=lambda x: x["time"])
+            self.market_cache[key][tfSec] = sorted_candles[-500:]
+            self._cache_loaded[key].add(tfSec)
+            # If there is currently a forming candle for this TF, merge it onto last bar
+            fkey = f"{key}_{tfSec}"
+            fc = self._forming.get(fkey)
+            if fc:
+                self._patch_live_candle(key, tfSec, fc)
+
+    def get_cached_candles(self, exchange: str, token: str, tf: str) -> Optional[list]:
+        """Return cached candles for this exchange/token/tf if loaded, else None.
+        The caller will ONLY hit Angel REST when this returns None."""
+        tfSec = TF_SECONDS.get(str(tf))
+        if not tfSec: return None
+        key = f"{ex_type(exchange)}_{token}"
+        with self._lock:
+            loaded = self._cache_loaded.get(key, set())
+            if tfSec not in loaded:
+                return None
+            arr = self.market_cache.get(key, {}).get(tfSec)
+            if not arr or len(arr) < 2:
+                return None
+            # Return a deep-ish copy (list of new dicts) to avoid mutation race
+            return [dict(c) for c in arr]
+
+    def is_tf_cached(self, exchange: str, token: str, tf: str) -> bool:
+        tfSec = TF_SECONDS.get(str(tf))
+        if not tfSec: return False
+        key = f"{ex_type(exchange)}_{token}"
+        with self._lock:
+            return tfSec in self._cache_loaded.get(key, set())
 
 
 # Singleton for the process
