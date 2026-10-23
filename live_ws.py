@@ -495,18 +495,20 @@ class LiveTickClient:
                 arr.append(dict(forming))
                 if len(arr) > 500: del arr[:-500]
 
-    def seed_market_cache(self, exType_or_key, token_or_key, tf: str, candles: list):
+    def seed_market_cache(self, exchange_or_exType, token: str, tf: str, candles: list):
         """Seed market_cache from Angel historical REST response. Called once per TF/session
         after a successful Angel getCandleData. After this, NO more Angel calls for this TF."""
         tf_str = str(tf)
         tfSec = TF_SECONDS.get(tf_str)
         if not tfSec:
             return
-        # Normalize key
-        if isinstance(exType_or_key, str) and exType_or_key.startswith(("1_", "2_", "3_", "4_", "5_", "7_", "13_")):
-            key = exType_or_key
+        # PRO FIX: ALWAYS use canonical key format "1_28378" (Never "NSE_28378")
+        if isinstance(exchange_or_exType, int):
+            key = f"{exchange_or_exType}_{token}"
+        elif isinstance(exchange_or_exType, str) and exchange_or_exType[:1].isdigit() and "_" in exchange_or_exType:
+            key = exchange_or_exType
         else:
-            key = f"{exType_or_key}_{token_or_key}"
+            key = f"{ex_type(str(exchange_or_exType))}_{token}"
         with self._lock:
             if key not in self.market_cache:
                 self.market_cache[key] = {}

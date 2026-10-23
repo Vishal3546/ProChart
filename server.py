@@ -335,51 +335,6 @@ def cache_cleanup():
 
 
 # ---------- Candle helper: simulated response anchored to LTP / known base ----------
-def _simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="SimulatedPro"):
-    interval_ms_map = {"1":60,"3":180,"5":300,"15":900,"30":1800,"60":3600,"D":86400}
-    step_s = interval_ms_map.get(interval, 900)
-    base = None
-    for item in POPULAR_TOKENS:
-        if item["symbol"].upper() == symbol.upper():
-            base = item.get("base", 1500.0); break
-    try:
-        qk = f"{exchange}:{token}"
-        if qk in quote_cache:
-            qd = quote_cache[qk][1]
-            if qd and qd.get("ltp") and qd["ltp"] > 0:
-                base = qd["ltp"]
-    except Exception:
-        pass
-    # Fallback: WS real-time LTP (most current price, even if REST quote is stale/blocked)
-    if not base or base <= 0:
-        try:
-            ws_p = live_ws.ltp(exchange, str(token))
-            if ws_p and ws_p > 0: base = ws_p
-        except Exception:
-            pass
-    if candles is not None and len(candles) > 0:
-        return {"status":"success","source":source,"candles":candles,"market_open":market_open,"stale":True}
-    if base is None or base <= 0:
-        return {"status":"success","source":source,"candles":[],"market_open":market_open,"loading":True}
-    count = 160 if interval != "D" else 500
-    end_ts = int(time.time()); end_ts = end_ts - (end_ts % step_s)
-    start_time = end_ts - (count - 1) * step_s
-    sim = []
-    p = base * (0.99 + random.random()*0.02)
-    vol_base = 100000 if step_s < 86400 else 5_000_000
-    for i in range(count):
-        drift = (base - p)*0.002 + (random.random()-0.5)*base*(0.012 if step_s==86400 else 0.0025)
-        o=p; c=o+drift
-        spread = abs(drift)+base*(0.005 if step_s==86400 else 0.0012)
-        h=max(o,c)+random.random()*spread; l=min(o,c)-random.random()*spread
-        v=int(vol_base+random.random()*vol_base*2)
-        if h<l: h,l=l,h
-        sim.append({"time":int(start_time+i*step_s),"open":round(o,2),"high":round(h,2),
-                    "low":round(l,2),"close":round(c,2),"volume":v})
-        p=c
-    return {"status":"success","source":source,"candles":sim,"market_open":market_open}
-
-
 def _auth_headers():
     return {
         "Authorization": f"Bearer {jwt_token}",
@@ -857,7 +812,7 @@ async def get_candles(
                 last_close = candles[-1]["close"]
                 if ws_ltp and ws_ltp > 0:
                     ratio = last_close / ws_ltp
-                    if ratio < 0.70 or ratio > 1.30:
+                    if ratio < 0.95 or ratio > 1.05:
                         print(f"⚠️ Sanity REJECT for {cache_key}: last close {last_close} vs WS LTP {ws_ltp} ({(ratio-1)*100:+.1f}%) — dropping")
                         candles = []
             except Exception:
@@ -912,8 +867,8 @@ async def get_candles(
             _my_fut.set_result(True)
             return _merge_live_candle(out, exchange, token, interval, market_open)
 
-        # --- 8. Fallback: simulated response (NEVER cached) ---
-        out = _simulated_response(symbol, token, exchange, interval, market_open)
+        # --- 8. Fallback: NO FAKE CANDLES (TradingView style) ---
+        out = {"status":"success", "source":"Empty", "candles":[], "market_open":market_open, "loading":True}
         if not _my_fut.done(): _my_fut.set_result(False)
         return _merge_live_candle(out, exchange, token, interval, market_open)
     except Exception as _e:

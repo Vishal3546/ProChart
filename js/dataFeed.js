@@ -108,7 +108,7 @@ class DataFeed {
                         if (ltp && ltp > 0 && candles.length > 0) {
                             const lc = candles[candles.length-1].close;
                             const r = lc / ltp;
-                            if (r < 0.75 || r > 1.25) {
+                            if (r < 0.95 || r > 1.05) {
                                 const pct = ((r-1)*100).toFixed(1);
                             console.warn('⚠️ Client sanity REJECT ' + cKey + ': last close ' + lc + ' vs LTP ' + ltp + ' (' + pct + '%) — NOT caching');
                                 sane = false;
@@ -130,10 +130,12 @@ class DataFeed {
                 if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
                 return { candles: [], source: 'empty', loading: true };
             } catch (err) {
-                if (err && err.name === 'AbortError') { throw err; }  // caller handles abort
-                console.warn('API candle fetch failed, using fallback:', err.message);
-                const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-                return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro' };
+                if (err && err.name === 'AbortError') { throw err; }
+                console.warn('API candle fetch failed:', err.message);
+                // NO FAKE CANDLES! Use Cache or Return Empty
+                const cached = this._loadLocalCache(symbol, timeframe);
+                if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
+                return { candles: [], source: 'Error', loading: false };
             } finally {
                 this._candleInFlight.delete(cKey);
                 this._candleAbort.delete(cKey);
@@ -194,7 +196,7 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v31'; }
+    _cacheVersion() { return 'v32'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         try {
@@ -247,36 +249,6 @@ class DataFeed {
             }))
             .filter(c => isFinite(c.open) && isFinite(c.high) && isFinite(c.low) && isFinite(c.close) &&
                          c.high >= c.low && c.high > 0 && c.low > 0);
-    }
-
-    generateFallbackCandles(tf = '15', anchorPrice = null) {
-        const count = 180;
-        const candles = [];
-        const now = Math.floor(Date.now() / 1000);
-        const tfSecMap = { '1': 60, '3': 180, '5': 300, '15': 900, '30': 1800, '60': 3600, 'D': 86400 };
-        const step = tfSecMap[tf] || 900;
-        const endTs = now - (now % step);
-        const startTs = endTs - (count - 1) * step;
-        // Use anchor price if known (e.g. last LTP from a prior good load),
-        // otherwise fall back to NIFTY default for the very first load.
-        let basePrice = (anchorPrice && anchorPrice > 0) ? anchorPrice : 22668.42;
-
-        for (let i = 0; i < count; i++) {
-            const drift = (Math.random() - 0.5) * basePrice * 0.002;
-            const open = basePrice;
-            const close = open + drift;
-            const high = Math.max(open, close) + Math.random() * basePrice * 0.0008;
-            const low = Math.min(open, close) - Math.random() * basePrice * 0.0008;
-            const volume = Math.floor(100000 + Math.random() * 700000);
-            candles.push({
-                time: startTs + i * step,
-                open: +open.toFixed(2), high: +high.toFixed(2),
-                low: +low.toFixed(2), close: +close.toFixed(2),
-                volume,
-            });
-            basePrice = close;
-        }
-        return candles;
     }
 }
 window.DataFeed = DataFeed;

@@ -272,29 +272,21 @@ class TVBridge {
     }
 
     _anchorToLatest(n) {
-        // Wait until after setData() has committed — rAF + timer ensures layout is ready
-        // and sub-charts (RSI/MACD) have their data attached before touching timeScale.
+        // PRO FIX: Let Lightweight Charts handle it natively
         const apply = () => {
             if (!this.charts || !this.charts.main) return;
             if (!this.currentData || this.currentData.length < 2) return;
-            const totalBars = this.currentData.length;
-            // Clamp n to actual data length — RSI/MACD may have fewer bars (indicator warmup)
-            const safeN = Math.min(n, totalBars);
-            const barsVisible = Math.min(80, Math.max(20, safeN - 1));
-            const fromIdx = Math.max(0, safeN - barsVisible);
-            const toIdx = safeN - 1;
-            if (fromIdx >= toIdx) return;  // invalid range — would throw in LWC
-            const range = { from: fromIdx - 0.5, to: toIdx + 6 };
             ['main','vol','rsi','macd'].forEach(k => {
                 if (!this.charts[k]) return;
-                try { this.charts[k].timeScale().setVisibleLogicalRange(range); } catch (_) {}
-                try { this.charts[k].timeScale().scrollToRealTime(); } catch (_) {}
+                try {
+                    this.charts[k].timeScale().fitContent();
+                    this.charts[k].timeScale().scrollToRealTime();
+                } catch (_) {}
             });
             try { this._syncAxisWidths(); } catch (_) {}
         };
         requestAnimationFrame(() => requestAnimationFrame(apply));
-        setTimeout(apply, 80);
-        setTimeout(apply, 350);
+        setTimeout(apply, 100); // 1 extra pass for safety
     }
 
     updateTick(candle) {
