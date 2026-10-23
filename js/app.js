@@ -937,26 +937,134 @@ class App {
             }
         } catch (e) {}
 
-        // 🚀 Off-main-thread analytics (TradingView-style): fire the worker with zero-copy
-        // Float64Array transfer. Sync engines already painted UI instantly above; the worker
-        // runs in parallel and its result is used as a silent health-check / future ground-truth.
-        // This keeps the main thread completely free for chart/UI during live ticks.
+        // 🚀 v41 UNIFIED 17-ENGINE WORKER: Batch A already painted instantly above using
+        // lightweight sync engines; Batch B (MasterPro/VCP/OrderFlow/NextCandle/TrendBias/TradingPlan/Pivots)
+        // proxies to worker via batchB_wrappers. Fire async Float64Array transferable — when result
+        // arrives, Batch B wrappers pick up latest from analyticsBridge._latest and we repaint
+        // ONLY the worker-backed panels. This keeps main thread at 0ms for chart/UI during ticks.
         try {
-            if (window.analyticsBridge) {
-                analyticsBridge.analyzeLive(data, {
+            if (window.analyticsBridge && !this._workerInflight) {
+                this._workerInflight = true;
+                analyticsBridge.analyze(data, {
                     symbol: this.activeSymbol,
                     tf: this.activeTimeframe,
+                    capital: this.userCapital || 100000,
+                    riskPct: this.userRiskPct || 1,
                     patternSettings: this.patternSettings,
-                }, (res) => {
-                    // Worker completed successfully — optional: patch UI with worker-computed values.
-                    // Currently sync engines are authoritative; worker results warm in background
-                    // and protect against main-thread jank.
-                    if (res && res.meta) {
-                        // Could overlay worker.checklist / breakout / divergence etc. here later.
-                    }
+                }).then((res) => {
+                    this._workerInflight = false;
+                    if (!res) return;
+                    try { this._repaintWorkerPanels(data, isRealData); } catch (_) {}
                 });
             }
-        } catch (e) { /* worker fail-open, UI still works via sync engines */ }
+        } catch (e) { this._workerInflight = false; }
+    }
+
+    _repaintWorkerPanels(data, isRealData) {
+        // Batch B (worker-backed panels) — uses thin wrappers that read analyticsBridge._latest
+        try {
+            const mp = this.proEngine.analyze(data);
+            this._setMetric('signalSqueeze', mp.squeeze.label, mp.squeeze.level);
+            this._setMetric('signalVsa', mp.vsa.label, mp.vsa.level);
+            this._setMetric('signalMacd', mp.macd.label, mp.macd.level);
+            this._setMetric('signalRsi', mp.rsi.label, mp.rsi.level);
+            if (isRealData && mp.score !== undefined) this._pushFeed(`MASTER: ${mp.macd.label} / ${mp.vsa.label}`, mp.score >= 1 ? 'bull' : (mp.score <= -1 ? 'bear' : 'neut'), 'master');
+        } catch (e) {}
+        try {
+            if (this.patternSettings.vcp) {
+                const v = this.vcpEngine.scan(data);
+                this._setMetric('vcpResult', v.label, v.level);
+                if (isRealData && v.detected) this._pushFeed(`VCP: ${v.label}`, 'bull', 'vcp');
+            }
+        } catch (e) {}
+        try {
+            if (this.patternSettings.abs) {
+                const a = this.absEngine.scan(data);
+                this._setMetric('absResult', a.label, a.level);
+                if (isRealData && a.detected && a.signals.length) {
+                    const last = a.signals[a.signals.length - 1];
+                    this._pushFeed(`Absorption: ${last.text}`, last.level === 'danger' ? 'bear' : 'bull', 'abs');
+                }
+            }
+        } catch (e) {}
+        try {
+            const tb = this.trendBiasEngine.analyze(data);
+            const el = document.getElementById('trendBiasResult');
+            if (el) {
+                el.textContent = tb.label;
+                el.className = 'bias-badge';
+                const map = { success: 'bias-bull', danger: 'bias-bear', muted: 'bias-neutral', info: 'bias-bull', warning: 'bias-bear' };
+                el.classList.add(map[tb.level] || 'bias-neutral');
+            }
+            const bd = document.getElementById('trendBiasBreakdown');
+            if (bd && tb.factors) {
+                const f = tb.factors;
+                const line = (name, v, bullTxt, bearTxt) => {
+                    const cls = v > 0 ? 'bias-fbull' : v < 0 ? 'bias-fbear' : 'bias-fneutral';
+                    const txt = v > 0 ? bullTxt : bearTxt;
+                    return `<div class="${cls}">${name}: ${txt}</div>`;
+                };
+                bd.innerHTML = [
+                    line('VWAP',  f.vwap||0,  'above ✓', 'below ✗'),
+                    line('EMA',   f.ema||0,   '20>50 ✓', '20<50 ✗'),
+                    line('RSI',   f.rsi||0,   '>50 ✓', '<50 ✗'),
+                ].join('');
+            }
+            const chartWrap = document.getElementById('mainTvChart');
+            if (chartWrap) {
+                chartWrap.classList.remove('bg-bull', 'bg-bear');
+                if (tb.bias === 'bull' && tb.score >= 2.5) chartWrap.classList.add('bg-bull');
+                else if (tb.bias === 'bear' && tb.score <= -2.5) chartWrap.classList.add('bg-bear');
+            }
+        } catch (e) {}
+        try {
+            const plan = this.tradingPlanEngine.plan(data, null);
+            const el = document.getElementById('tradePlanResult');
+            if (el && plan.ready) {
+                const sideColor = plan.direction === 'LONG' ? '#089981' : '#f23645';
+                const actionTxt = plan.actionable ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>' : `⏳ Pending (${Math.abs(plan.dist_pct).toFixed(2)}% away)`;
+                el.innerHTML = `
+                    <div style="font-size:13px;font-weight:800;color:${sideColor};margin-bottom:6px;text-align:center;">
+                        ${plan.direction} — ${actionTxt}
+                    </div>
+                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${plan.entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason}</span></div>
+                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${plan.sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason}</span></div>
+                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${plan.t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason}</span></div>
+                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${plan.t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-top:8px;font-size:10px;text-align:center;font-family:'JetBrains Mono',monospace;">
+                        <div>ATR<br><b>${plan.atr.toFixed(2)}</b></div>
+                        <div>RR1<br><b style="color:${plan.rr1>=1.5?'#089981':'#f23645'}">1:${plan.rr1.toFixed(2)}</b></div>
+                        <div>RR2<br><b style="color:${plan.rr2>=2?'#089981':'#ffae00'}">1:${plan.rr2.toFixed(2)}</b></div>
+                    </div>
+                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${plan.rr1>=1.5?'#089981':'#f23645'};">${plan.verdict}</div>
+                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk}</b> shares</div>
+                `;
+                el.className = '';
+            } else if (el) {
+                el.innerHTML = `<div style="font-size:11px;text-align:center;opacity:0.7;padding:12px 6px;">${plan && plan.reason ? plan.reason : 'No strong bias yet'}</div>`;
+                el.className = 'plan-empty';
+            }
+        } catch (e) {}
+        try {
+            const nc = this.nextCandlePredictor.analyze(data);
+            let label = '—', level = 'muted';
+            if (nc.direction === 'bull') {
+                label = `🟢 BULL ${nc.confidence.toUpperCase()} (${nc.score >= 0 ? '+' : ''}${nc.score})`;
+                level = nc.confidence === 'high' ? 'success' : nc.confidence === 'med' ? 'info' : 'muted';
+            } else if (nc.direction === 'bear') {
+                label = `🔴 BEAR ${nc.confidence.toUpperCase()} (${nc.score})`;
+                level = nc.confidence === 'high' ? 'danger' : nc.confidence === 'med' ? 'warning' : 'muted';
+            } else {
+                label = `⚪ NEUTRAL (${nc.score})`;
+                level = 'muted';
+            }
+            this._setMetric('nextCandleResult', label, level);
+            const reasons = document.getElementById('nextCandleReasons');
+            if (reasons && nc.factors) {
+                reasons.innerHTML = (nc.factors || []).slice(0, 3).map(f =>
+                    `<div style="font-size:10px;opacity:0.75;padding:1px 0;">• ${f}</div>`).join('');
+            }
+        } catch (e) {}
     }
 
     _setMetric(id, text, level) {
