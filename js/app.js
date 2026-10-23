@@ -541,44 +541,51 @@ class App {
         const symHeader = document.getElementById('activeSymbol');
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
-        // ----- INSTANT CHART: TradingView-style — render localStorage cache FIRST (if exists & fresh),
-        // then silently refresh from Angel in background. This gives sub-100ms TF switch UX.
-        const instantCache = this.dataFeed._loadLocalCache(symbol, tf);
-        const hadInstant = !!(instantCache && instantCache.length);
+        // ----- INSTANT CHART: TradingView-style — render localStorage cache FIRST (if exists & fresh)
+        // but ONLY for the SAME symbol+tf as last visit (don't show INDHOTEL cache for IGIL).
+        const lastCachedSym = localStorage.getItem('prochart_symbol');
+        const lastCachedTf  = localStorage.getItem('prochart_tf');
+        const sameSymbol    = lastCachedSym === symbol;
+        const instantCache  = sameSymbol ? this.dataFeed._loadLocalCache(symbol, tf) : null;
+        const hadInstant    = !!(instantCache && instantCache.length);
         if (hadInstant) {
             const saneInst = this._sanitizeCandles(instantCache, symbol);
-            this._lastGoodPrice[symbol] = saneInst[saneInst.length - 1].close;
-            this.tvBridge.setCandleData(saneInst);
-            requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(saneInst); });
-            const last = saneInst[saneInst.length - 1];
-            this.lastLtp = last.close;
-            this.prevClose = this._findDayOpen(saneInst, tf);
-            this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
-            this.setConnectionStatus(false, 'Cached');
-            const sp = document.getElementById('greekSpot'); if (sp) sp.value = last.close.toFixed(2);
+            // Safety: if cache last price wildly diverges from header LTP (different stock / stale), skip
+            const cacheLast = saneInst[saneInst.length - 1].close;
+            const priceOk = !this.lastLtp || !isFinite(this.lastLtp) || this.lastLtp <= 0
+                || Math.abs(cacheLast - this.lastLtp) / this.lastLtp < 0.15;  // <15% divergence
+            if (priceOk && saneInst.length >= 10) {
+                this._lastGoodPrice[symbol] = cacheLast;
+                this.tvBridge.setCandleData(saneInst);
+                requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(saneInst); });
+                const last = saneInst[saneInst.length - 1];
+                this.lastLtp = last.close;
+                this.prevClose = this._findDayOpen(saneInst, tf);
+                this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
+                this.setConnectionStatus(false, 'Cached');
+                const sp = document.getElementById('greekSpot'); if (sp) sp.value = last.close.toFixed(2);
+            }
         } else if (!isRetry) {
-            // No cache — show subtle "loading" pill on chart pane but don't blank the chart
-            // (keep previous symbol's chart visible for a moment for visual continuity)
+            // No cache — show subtle "loading" pill, keep PREVIOUS chart visible for continuity
             const el = document.getElementById('trendBiasResult');
             if (el) { el.textContent = '⏳ Loading...'; el.className = 'bias-badge bias-neutral'; }
         }
 
         // WS subscription: only change when SYMBOL changes; pure TF switch keeps same WS tick stream
-        // (just needs a new SSE interval bucket for forming candles). Skip on retries entirely.
         if (!isRetry) {
-            // Abort any prior in-flight candle fetch for other TFs (prevents stale responses overwriting new TF)
+            // Abort all prior in-flight candle fetches (critical! prevents stale responses
+            // from older TF/symbol overwriting the newly requested fresh data)
             this.dataFeed && this.dataFeed.abortAllCandles && this.dataFeed.abortAllCandles();
             this.connectLiveStream();
         }
 
-        const meta = { token: this.activeToken, exchange: this.activeExchange,
-                       signal: this._pendingLoadAbort ? this._pendingLoadAbort.signal : null };
+        const meta = { token: this.activeToken, exchange: this.activeExchange };
         let cd;
         try {
             cd = await this.dataFeed.fetchCandles(symbol, tf, meta);
         } catch (e) {
             if (e && e.name === 'AbortError') return;  // newer click superseded us
-            return;  // silent — instant cache already showed if available
+            return;
         }
         let candles = cd.candles;
         const source = cd.source;
@@ -588,18 +595,23 @@ class App {
 
         candles = this._sanitizeCandles(candles, symbol);
 
-        if (cd && cd.loading && (!candles || candles.length === 0)) {
-            // No data yet — exponential backoff retry, no WS resubscribe
+        // IMPORTANT: always accept real AngelOne data even if instant cache was shown
+        // (fresh server data is truth). Accept fallback/cache/simulated only if we have nothing
+        // better rendered yet OR the data length is substantial (>=30 bars).
+        const haveSubstantial = candles && candles.length >= 30;
+        const isFreshAngel = source === 'AngelOne';
+        if (!candles || candles.length < 2) {
+            // No new data — retry, keep whatever is on screen
             const el = document.getElementById('trendBiasResult');
-            if (el) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
+            if (el && !hadInstant) { el.textContent = '⏳ Loading candles...'; el.className = 'bias-badge bias-neutral'; }
             clearTimeout(this._retryLoadTimer);
             this._retryCount = (this._retryCount || 0) + 1;
             const waitMs = Math.min(2000 * this._retryCount, 10000);
             this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf, { retry: true }), waitMs);
             return;
         }
-        this._retryCount = 0;
-        if (candles && candles.length > 0) {
+        // Render fresh data ALWAYS when AngelOne, or when nothing is shown yet
+        if (isFreshAngel || haveSubstantial || !hadInstant) {
             this.tvBridge.setCandleData(candles);
             requestAnimationFrame(() => {
                 this.applyIndicators();
@@ -612,6 +624,7 @@ class App {
             this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
             const btn = document.getElementById('greekCalcBtn'); if (btn) btn.click();
         }
+        this._retryCount = 0;
     }
 
     /** Strip extreme outlier candles (>50% gap AND single-bar spike = high<next_low or low>next_high) */

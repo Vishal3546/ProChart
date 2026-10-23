@@ -75,15 +75,26 @@ class DataFeed {
                 }
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0) {
+                // REJECT simulated/cooldown/inflight responses when we don't already have good data on screen —
+                // server returns anchored random-walk candles that drift and look NOTHING like real price,
+                // which causes the "30m chart shows 307 when price is 359" corruption. Better to show empty/loading
+                // than fake data anchored to a stale price.
+                const isFake = data && data.source && (data.source === 'SimulatedPro' || data.source === 'Cooldown' || data.source === 'InFlight');
+                if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0 && !isFake) {
                     const candles = this.formatCandles(data.candles);
                     if (data.source === 'AngelOne') this._saveLocalCache(symbol, timeframe, candles);
                     return { candles, source: data.source || 'unknown' };
                 }
+                if (isFake) {
+                    // Fake/cooldown data: use localStorage cache if available; otherwise return loading (no fake render)
+                    const cached = this._loadLocalCache(symbol, timeframe);
+                    if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
+                    return { candles: [], source: data.source, loading: true, cooldown: data.source === 'Cooldown' };
+                }
+                // Empty success or other: fall back to cache
                 const cached = this._loadLocalCache(symbol, timeframe);
                 if (cached && cached.length) return { candles: cached, source: 'LocalCache', stale: true };
-                const lastLtp = window._app && window._app._lastGoodPrice && window._app._lastGoodPrice[symbol];
-                return { candles: this.generateFallbackCandles(timeframe, lastLtp), source: 'SimulatedPro', loading: data && data.loading };
+                return { candles: [], source: 'empty', loading: true };
             } catch (err) {
                 if (err && err.name === 'AbortError') { throw err; }  // caller handles abort
                 console.warn('API candle fetch failed, using fallback:', err.message);
