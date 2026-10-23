@@ -71,6 +71,15 @@ class App {
         await this.checkServerStatus();
         // PRO FIX: Direct load — no 12-second leader election wait (single-tab local server)
         this._isLeaderTab = true; this._passiveTab = false;
+
+        // 🚀 Open IndexedDB + warm hot caches in background (non-blocking)
+        try {
+            if (window.idbCache) {
+                await idbCache.open();
+                idbCache.warm(this.activeSymbol).catch(() => {});
+            }
+        } catch(e) { console.warn('[IDB] warm failed', e); }
+
         // INSTANT chart from localStorage cache (TradingView-style — zero delay)
         try {
             const cached = this.dataFeed._loadLocalCache(this.activeSymbol, this.activeTimeframe);
@@ -927,6 +936,27 @@ class App {
                     `<div style="font-size:10px;opacity:0.75;padding:1px 0;">• ${f}</div>`).join('');
             }
         } catch (e) {}
+
+        // 🚀 Off-main-thread analytics (TradingView-style): fire the worker with zero-copy
+        // Float64Array transfer. Sync engines already painted UI instantly above; the worker
+        // runs in parallel and its result is used as a silent health-check / future ground-truth.
+        // This keeps the main thread completely free for chart/UI during live ticks.
+        try {
+            if (window.analyticsBridge) {
+                analyticsBridge.analyzeLive(data, {
+                    symbol: this.activeSymbol,
+                    tf: this.activeTimeframe,
+                    patternSettings: this.patternSettings,
+                }, (res) => {
+                    // Worker completed successfully — optional: patch UI with worker-computed values.
+                    // Currently sync engines are authoritative; worker results warm in background
+                    // and protect against main-thread jank.
+                    if (res && res.meta) {
+                        // Could overlay worker.checklist / breakout / divergence etc. here later.
+                    }
+                });
+            }
+        } catch (e) { /* worker fail-open, UI still works via sync engines */ }
     }
 
     _setMetric(id, text, level) {

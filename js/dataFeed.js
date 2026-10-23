@@ -106,7 +106,24 @@ class DataFeed {
                 // than fake data anchored to a stale price.
                 const isFake = data && data.source && (data.source === 'SimulatedPro' || data.source === 'Cooldown' || data.source === 'InFlight');
                 if (data && data.status === 'success' && Array.isArray(data.candles) && data.candles.length > 0 && !isFake) {
-                    const candles = this.formatCandles(data.candles);
+                    let candles = this.formatCandles(data.candles);
+
+                    // Corporate action adjustment (split/bonus/dividend safety net)
+                    try {
+                        if (window.corporateActions && candles.length) {
+                            const sus = window.corporateActions.detectUnadjustedSplit(candles);
+                            if (sus) console.warn('[CorporateActions] Possible unregistered split', symbol, sus);
+                            candles = window.corporateActions.adjust(symbol, candles);
+                        }
+                    } catch(_) {}
+
+                    // Async dual-write to IndexedDB (fire-and-forget — UI never waits)
+                    try {
+                        if (window.idbCache && candles.length) {
+                            window.idbCache.set(symbol, timeframe, candles).catch(() => {});
+                        }
+                    } catch(_) {}
+
                     // Price-divergence sanity: don't save to localStorage if last candle is >25% off known LTP
                     // (defense in depth — server already does this check too)
                     let sane = true;
@@ -178,7 +195,7 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v37'; }
+    _cacheVersion() { return 'v38'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         try {
