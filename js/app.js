@@ -523,6 +523,7 @@ class App {
     async loadChartData(symbol, tf, opts = {}) {
         const isRetry = !!opts.retry;
         const isFirstLoad = !!opts.firstLoad;
+        const prevSymbol = this.activeSymbol;
         this.activeSymbol = symbol;
         this.activeTimeframe = tf;
         localStorage.setItem('prochart_symbol', symbol);
@@ -533,10 +534,9 @@ class App {
         if (symHeader) symHeader.innerText = `${symbol} ${label}`;
 
         // ----- INSTANT CHART: TradingView-style — render localStorage cache FIRST (if exists & fresh)
-        // but ONLY for the SAME symbol+tf as last visit (don't show INDHOTEL cache for IGIL).
-        const lastCachedSym = localStorage.getItem('prochart_symbol');
-        const lastCachedTf  = localStorage.getItem('prochart_tf');
-        const sameSymbol    = lastCachedSym === symbol;
+        // but ONLY for the SAME symbol as before (don't flash INDHOTEL cache for IGIL).
+        // Use prevSymbol (NOT localStorage.getItem which we just overwrote above).
+        const sameSymbol    = prevSymbol === symbol;
         const instantCache  = sameSymbol ? this.dataFeed._loadLocalCache(symbol, tf) : null;
         const hadInstant    = !!(instantCache && instantCache.length);
         if (hadInstant) {
@@ -946,6 +946,9 @@ class App {
         const channel = key || 'generic';
         if (this.lastSignalByKey[channel] === text) return;
         this.lastSignalByKey[channel] = text;
+        // Housekeeping: cap dedup map at 200 entries (prevent slow leak in 12hr sessions)
+        const _keys = Object.keys(this.lastSignalByKey);
+        if (_keys.length > 200) { _keys.slice(0, _keys.length - 100).forEach(k => delete this.lastSignalByKey[k]); }
         const now = new Date(Date.now() + 5.5 * 3600 * 1000);
         const ts = now.toISOString().substr(11, 8) + ' IST';
         this.signalFeed.unshift({ ts, text, kind });

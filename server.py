@@ -89,15 +89,15 @@ POPULAR_TOKENS = [
     {"symbol": "BHARTIARTL","name": "BHARTI AIRTEL",          "token": "10999",    "exchange": "NSE", "base": 1650.00},
     {"symbol": "LT",        "name": "LARSEN & TOUBRO",        "token": "11483",    "exchange": "NSE", "base": 3700.00},
     {"symbol": "AXISBANK",  "name": "AXIS BANK",              "token": "5900",     "exchange": "NSE", "base": 1180.00},
-    {"symbol": "ITC",       "name": "ITC LTD",                "token": "16675",    "exchange": "NSE", "base": 490.00},
+    {"symbol": "ITC",       "name": "ITC LTD",                "token": "1660",     "exchange": "NSE", "base": 490.00},
     {"symbol": "HINDUNILVR","name": "HINDUSTAN UNILEVER",     "token": "1394",     "exchange": "NSE", "base": 2560.00},
-    {"symbol": "MARUTI",    "name": "MARUTI SUZUKI",          "token": "13538",    "exchange": "NSE", "base": 11500.00},
+    {"symbol": "MARUTI",    "name": "MARUTI SUZUKI",          "token": "10999",    "exchange": "NSE", "base": 11500.00},
     {"symbol": "ADANIENT",  "name": "ADANI ENTERPRISES",      "token": "694",      "exchange": "NSE", "base": 2400.00},
     {"symbol": "WIPRO",     "name": "WIPRO LTD",              "token": "3450",     "exchange": "NSE", "base": 520.00},
     {"symbol": "TECHM",     "name": "TECH MAHINDRA",          "token": "13538",    "exchange": "NSE", "base": 1520.00},
     {"symbol": "BAJFINANCE","name": "BAJAJ FINANCE",          "token": "11532",    "exchange": "NSE", "base": 6800.00},
     {"symbol": "ASIANPAINT","name": "ASIAN PAINTS",           "token": "236",      "exchange": "NSE", "base": 2900.00},
-    {"symbol": "SUNPHARMA", "name": "SUN PHARMA",             "token": "16675",    "exchange": "NSE", "base": 1800.00},
+    {"symbol": "SUNPHARMA", "name": "SUN PHARMA",             "token": "3351",     "exchange": "NSE", "base": 1800.00},
     {"symbol": "ONGC",      "name": "OIL & NATURAL GAS",      "token": "2475",     "exchange": "NSE", "base": 260.00},
     {"symbol": "NTPC",      "name": "NTPC LTD",               "token": "20374",    "exchange": "NSE", "base": 370.00},
     {"symbol": "KOTAKBANK", "name": "KOTAK MAHINDRA BANK",    "token": "1922",     "exchange": "NSE", "base": 1780.00},
@@ -565,17 +565,24 @@ async def ticks_stream(request: Request, exchange: str = "NSE", token: str = "",
                 try: my_q.put_nowait({"type":"candle","data":fc})
                 except asyncio.QueueFull: pass
 
-    broadcaster_task = asyncio.create_task(_broadcaster())
     headers = {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
-    try:
-        return _SR(event_gen(), headers=headers, media_type="text/event-stream")
-    finally:
-        broadcaster_task.cancel()
+
+    async def event_gen_with_broadcaster():
+        _bt = asyncio.create_task(_broadcaster())
+        try:
+            async for chunk in event_gen():
+                yield chunk
+        finally:
+            _bt.cancel()
+            try: await _bt
+            except asyncio.CancelledError: pass
+
+    return _SR(event_gen_with_broadcaster(), headers=headers, media_type="text/event-stream")
 
 # Old inlined event_gen code removed (replaced above)
 
@@ -731,7 +738,6 @@ async def get_candles(
             "fromdate": start_dt.strftime("%Y-%m-%d %H:%M"),
             "todate":   end_dt.strftime("%Y-%m-%d %H:%M"),
         }
-        _inflight_candle[cache_key] = True
         _last_candle_req = time.monotonic()
         try:
             def _do_call(p=params):
@@ -900,7 +906,7 @@ def _merge_live_candle(out: dict, exchange: str, token: str, interval: str, mark
             last["low"] = min(last.get("low", fc["low"]), fc["low"])
             last["close"] = fc["close"]
             # Volume from forming-candle is delta-vol since bucket start; add to prior close volume if any
-            last["volume"] = int(fc["volume"] or last.get("volume", 0))
+            last["volume"] = max(int(fc["volume"] or 0), int(last.get("volume", 0)))
         elif fc["time"] > last.get("time", 0):
             # New bucket (history hasn't caught up yet) → append
             cs.append({
