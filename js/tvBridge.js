@@ -99,19 +99,23 @@ class TVBridge {
 
     _syncTimeScales() {
         const keys = ['main', 'vol', 'rsi', 'macd'];
+        // Pro pattern (TradingView-style): one subscription per source → broadcasts to all others.
+        // 4 subscriptions total instead of 12 — same functional result, ~3x less CPU on pan/zoom.
         keys.forEach(src => {
             const srcTS = this.charts[src].timeScale();
-            keys.forEach(dst => {
-                if (dst === src) return;
-                const dstTS = this.charts[dst].timeScale();
-                srcTS.subscribeVisibleLogicalRangeChange((range) => {
-                    if (this._syncing) return;
-                    if (!range || range.from == null || range.to == null) return;
-                    if (range.from >= range.to) return;  // LWC would throw
-                    this._syncing = true;
-                    try { dstTS.setVisibleLogicalRange(range, true); } catch(_) {}
+            srcTS.subscribeVisibleLogicalRangeChange((range) => {
+                if (this._syncing) return;
+                if (!range || range.from == null || range.to == null) return;
+                if (range.from >= range.to) return;
+                this._syncing = true;
+                try {
+                    keys.forEach(dst => {
+                        if (dst === src) return;
+                        try { this.charts[dst].timeScale().setVisibleLogicalRange(range); } catch(_) {}
+                    });
+                } finally {
                     this._syncing = false;
-                });
+                }
             });
         });
     }
@@ -120,14 +124,23 @@ class TVBridge {
         const sync = () => {
             Object.entries(this.charts).forEach(([k, c]) => {
                 const el = this.paneEls[k];
-                c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+                if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+                    c.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+                }
             });
         };
+        // RAF-debounced: coalesce many ResizeObserver fires into one paint-aligned call
+        let rafId = null;
+        const debouncedSync = () => {
+            if (rafId) return;
+            rafId = requestAnimationFrame(() => { rafId = null; sync(); });
+        };
         if (window.ResizeObserver) {
-            this._resizeObserver = new ResizeObserver(sync);
+            if (this._resizeObserver) { try { this._resizeObserver.disconnect(); } catch(_){} }
+            this._resizeObserver = new ResizeObserver(debouncedSync);
             Object.values(this.paneEls).forEach(el => this._resizeObserver.observe(el));
         } else {
-            window.addEventListener('resize', sync);
+            window.addEventListener('resize', debouncedSync);
         }
         setTimeout(sync, 60);
         setTimeout(sync, 300);
@@ -272,31 +285,42 @@ class TVBridge {
     }
 
     _anchorToLatest(n) {
-        // PRO FIX: Let Lightweight Charts handle it natively
+        // TradingView-style: show last ~120 bars (not all bars shrunken), then scroll to realtime.
         const apply = () => {
             if (!this.charts || !this.charts.main) return;
             if (!this.currentData || this.currentData.length < 2) return;
+            const total = this.currentData.length;
+            const visible = Math.min(120, total);       // show last 120 bars by default
+            const from = Math.max(0, total - visible);
+            const to = total + 6;                        // +6 right-offset for breathing room
             ['main','vol','rsi','macd'].forEach(k => {
                 if (!this.charts[k]) return;
                 try {
-                    this.charts[k].timeScale().fitContent();
-                    this.charts[k].timeScale().scrollToRealTime();
-                } catch (_) {}
+                    this.charts[k].timeScale().setVisibleLogicalRange({ from, to });
+                } catch (_) {
+                    try { this.charts[k].timeScale().scrollToRealTime(); } catch(_){}
+                }
             });
-            try { this._syncAxisWidths(); } catch (_) {}
         };
         requestAnimationFrame(() => requestAnimationFrame(apply));
-        setTimeout(apply, 100); // 1 extra pass for safety
+        setTimeout(apply, 100);
     }
 
     updateTick(candle) {
         if (!this.series.main) return;
         const ts = this._toSec(candle.time);
-        this.series.main.update({ time: ts, open: +candle.open, high: +candle.high, low: +candle.low, close: +candle.close });
-        this.series.vol.update({
+        if (!(ts > 0)) return;
+        // v5 guard: update time must be >= last bar's time, else LWC throws "data must be ordered"
+        const last = this.currentData.length ? this._toSec(this.currentData[this.currentData.length - 1].time) : 0;
+        if (last && ts < last) return;  // silently drop out-of-order ticks (SSE replay safety)
+        const o = +candle.open, h = +candle.high, l = +candle.low, c = +candle.close;
+        if (!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(c)) return;
+        if (!(h >= l) || o <= 0 || c <= 0) return;
+        try { this.series.main.update({ time: ts, open: o, high: h, low: l, close: c }); } catch(_){}
+        try { this.series.vol.update({
             time: ts, value: +(candle.volume || 0),
-            color: candle.close >= candle.open ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
-        });
+            color: c >= o ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
+        }); } catch(_){}
     }
 
     // ---------- overlays (all live on main chart) ----------
@@ -409,12 +433,10 @@ class TVBridge {
 
     // ---------- clear / markers ----------
     clearIndicators() {
+        // _removeOverlay handles all main-chart overlays (ema, sma, vwap, bb*, supertrend)
         Object.keys(this.overlays).forEach(k => this._removeOverlay(k));
-        if (this.vwapSeries) { try { this.charts.main.removeSeries(this.vwapSeries); } catch (e) {} this.vwapSeries = null; }
-        this.removeBollinger();
-        this.removeSuperTrend();
         this.removeMACD();
-        // RSI: clear data but don't delete series (series deletion → null errors)
+        // RSI: clear data but don't delete series (series deletion → null errors in v5)
         try { if (this.series.rsi) this.series.rsi.setData([]); } catch (e) {}
     }
 

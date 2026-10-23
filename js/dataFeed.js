@@ -27,6 +27,12 @@ class DataFeed {
         const now = Date.now();
         const g = Math.max(0, this._candleCooldownUntil - now);
         const pk = Math.max(0, (this._perKeyCooldown.get(cKey) || 0) - now);
+        // Opportunistic housekeeping — purge expired cooldowns to prevent slow Map growth
+        if (this._perKeyCooldown.size > 50) {
+            for (const [k, v] of this._perKeyCooldown.entries()) {
+                if (v < now) this._perKeyCooldown.delete(k);
+            }
+        }
         return Math.max(g, pk);
     }
 
@@ -34,11 +40,15 @@ class DataFeed {
     abortCandle(key) {
         const ctrl = this._candleAbort.get(key);
         if (ctrl) { try { ctrl.abort(); } catch(_){} this._candleAbort.delete(key); }
+        // Also clear the in-flight promise so the next request starts FRESH
+        // (prevents returning an aborted promise to new callers)
+        this._candleInFlight.delete(key);
     }
     /** Cancel ALL in-flight candle fetches (called on page nav/unload) */
     abortAllCandles() {
         for (const ctrl of this._candleAbort.values()) { try { ctrl.abort(); } catch(_){} }
         this._candleAbort.clear();
+        this._candleInFlight.clear();
     }
 
     async fetchCandles(symbol, tf, meta = {}) {
@@ -183,7 +193,7 @@ class DataFeed {
         try {
             const url = `${this.baseUrl}/api/search?q=${encodeURIComponent(q || '')}`;
             const res = await fetch(url, { cache: 'no-store' });
-            if (!res.ok) return [];
+            if (!res.ok) return { results: [], loaded: false, message: `HTTP ${res.status}` };
             const data = await res.json();
             return {
                 results: Array.isArray(data.results) ? data.results : [],
@@ -196,7 +206,7 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v33'; }
+    _cacheVersion() { return 'v34'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         try {

@@ -143,12 +143,17 @@ def _download_with_progress():
     """Stream download Angel One master with progress, return parsed JSON list."""
     last_print = [0.0]
     received = [0]
+    total_size = [0]
     def _chunk_hook(chunk):
         received[0] += len(chunk)
         now = time.time()
         if now - last_print[0] >= 0.3:
             last_print[0] = now
-            sys.stdout.write(f"\r[download] {_format_mb(received[0])} received  ")
+            if total_size[0] > 0:
+                pct = (received[0] / total_size[0]) * 100
+                sys.stdout.write(f"\r[download] {_format_mb(received[0])} / {_format_mb(total_size[0])} ({pct:.1f}%)  ")
+            else:
+                sys.stdout.write(f"\r[download] {_format_mb(received[0])} received  ")
             sys.stdout.flush()
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -156,7 +161,7 @@ def _download_with_progress():
             headers = {"User-Agent": "ProChart/2026.10", "Accept": "application/json"}
             r = requests.get(ANGEL_URL, headers=headers, stream=True, timeout=180)
             r.raise_for_status()
-            total = int(r.headers.get("content-length", 0) or 0)
+            total_size[0] = int(r.headers.get("content-length", 0) or 0)
             received[0] = 0
             sys.stdout.write(f"\r[download] connecting... ")
             sys.stdout.flush()
@@ -228,6 +233,12 @@ def load_cached():
     for path in (INDEX_FILE, SCRIP_FILE):
         try:
             if not os.path.exists(path):
+                continue
+            # Skip zero-byte or trivially small files (interrupted download)
+            if os.path.getsize(path) < 1024:
+                _log(f"Skipping tiny/corrupt cache file: {os.path.basename(path)} ({os.path.getsize(path)}B)")
+                try: os.remove(path)
+                except: pass
                 continue
             mtime = os.path.getmtime(path)
             age_days = (time.time() - mtime) / 86400
@@ -365,6 +376,10 @@ def search(q, limit=20):
     else:
         # Build alias-matched symKey/name to float to the very top
         alias_target = _ALIASES.get(q_collapsed) or _ALIASES.get(raw_collapsed)
+        # Pre-compute token lists ONCE outside loop (was being recomputed per instrument = CPU waste)
+        _toks = [t for t in query.split() if len(t) >= 2]
+        _raw_toks = [t for t in raw_query.split() if len(t) >= 2]
+        _all_toks = _toks + [t for t in _raw_toks if t not in _toks]
         matches = []
         for s in _search_index:
             sk = s["symKey"]; nk = s["nameKey"]
@@ -390,10 +405,7 @@ def search(q, limit=20):
                     rank = 4
                 else:  # fuzzy tiers only for non-matches
                     # Multi-token match: all tokens appear in sym or name (e.g. "indian hot" -> INDIAN HOTELS)
-                    toks = [t for t in query.split() if len(t) >= 2]
-                    raw_toks = [t for t in raw_query.split() if len(t) >= 2]
-                    all_toks = toks + [t for t in raw_toks if t not in toks]
-                    if all_toks and all((t in sk or t in nk or _word_prefix_match(nk, t)) for t in all_toks):
+                    if _all_toks and all((t in sk or t in nk or _word_prefix_match(nk, t)) for t in _all_toks):
                         rank = 5
                     # Word-prefix match for single-word query (e.g. "hotel" -> EIHOTEL, INDHOTEL)
                     elif len(query) >= 3 and _word_prefix_match(nk, query):

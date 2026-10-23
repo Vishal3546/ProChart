@@ -172,6 +172,10 @@ class LiveTickClient:
         with self._lock:
             if key in self._subscribed:
                 return True
+            # Angel docs: max 1000 tokens per connection — guard against runaway subs
+            if len(self._subscribed) >= 950:
+                log.warning(f"Subscription limit reached ({len(self._subscribed)}); dropping {key}")
+                return False
             self._subscribed[key] = {"exchangeType": ex_type(exchange), "token": token}
             if self._connected and self._ws is not None:
                 try:
@@ -373,10 +377,15 @@ class LiveTickClient:
             }
         All prices are in paise (×100). We divide by 100.
         """
-        if not message or not isinstance(message, dict):
+        if not message:
             return
-        # Angel sometimes wraps in list
-        ticks = [message]
+        # SmartWebSocketV2 sends dict per callback, but defensively handle list too
+        if isinstance(message, list):
+            ticks = [m for m in message if isinstance(m, dict)]
+        elif isinstance(message, dict):
+            ticks = [message]
+        else:
+            return
         for m in ticks:
             try:
                 if m.get("error"):
@@ -501,6 +510,10 @@ class LiveTickClient:
         tf_str = str(tf)
         tfSec = TF_SECONDS.get(tf_str)
         if not tfSec:
+            return
+        if not candles or len(candles) < 2:
+            # Don't mark TF as cached if we got nothing — else is_tf_cached() returns True
+            # for an empty cache and the UI shows a blank chart forever.
             return
         # PRO FIX: ALWAYS use canonical key format "1_28378" (Never "NSE_28378")
         if isinstance(exchange_or_exType, int):
