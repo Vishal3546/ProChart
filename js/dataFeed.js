@@ -15,9 +15,6 @@ class DataFeed {
         this._candleCooldownUntil = 0;     // global cooldown ms timestamp
         this._perKeyCooldown = new Map();  // per-cacheKey cooldown until ms timestamp
         this._candleAbort = new Map();     // per-key AbortController
-        this._quoteInFlight = null;
-        this._lastQuoteKey = null;
-        this._lastQuoteAt = 0;
         // Purge old-version caches immediately on startup
         this._purgeOldCaches && this._purgeOldCaches();
     }
@@ -155,31 +152,6 @@ class DataFeed {
         return p;
     }
 
-    async fetchLiveQuote(symbol = 'NIFTY', meta = {}) {
-        const token = meta.token || '';
-        const exchange = meta.exchange || 'NSE';
-        const key = `${exchange}:${token}`;
-        const now = Date.now();
-        // Dedupe: same quote within 2s → return in-flight / skip
-        if (key === this._lastQuoteKey && now - this._lastQuoteAt < 2000 && this._quoteInFlight) {
-            return this._quoteInFlight;
-        }
-        this._lastQuoteKey = key;
-        this._lastQuoteAt = now;
-        this._quoteInFlight = (async () => {
-            try {
-                const params = new URLSearchParams({ symbol });
-                if (meta.token)    params.set('token', meta.token);
-                if (meta.exchange) params.set('exchange', meta.exchange);
-                const url = `${this.baseUrl}/api/quote?${params.toString()}`;
-                const res = await fetch(url, { cache: 'no-store' });
-                if (!res.ok) return null;
-                return await res.json();
-            } catch (err) { return null; }
-        })();
-        return this._quoteInFlight;
-    }
-
     async fetchStatus() {
         try {
             const url = `${this.baseUrl}/api/status`;
@@ -206,7 +178,7 @@ class DataFeed {
     // ---------- localStorage candle cache (TradingView-style instant chart load) ----------
     // CACHE_VERSION bump karo jab bhi candle format change karein — purani corrupt cache
     // auto-reject ho jayegi (308-range wali purani cache ki tarah bugs prevent karta hai).
-    _cacheVersion() { return 'v34'; }
+    _cacheVersion() { return 'v36'; }
     _cacheKey(symbol, tf) { return `pc_cdl_${this._cacheVersion()}_${symbol}_${tf}`; }
     _saveLocalCache(symbol, tf, candles) {
         try {

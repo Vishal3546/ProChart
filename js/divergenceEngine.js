@@ -7,8 +7,20 @@
 class DivergenceEngine {
     scanDivergences(candles, rsiValues) {
         const out = { detected: false, label: '⚪ NONE', level: 'muted', direction: null, details: null };
-        if (!candles || candles.length < 30 || !rsiValues) return out;
+        if (!candles || candles.length < 30 || !rsiValues || !rsiValues.length) return out;
         const n = candles.length;
+
+        // Normalize RSI array to match candles length (right-align) — TechnicalIndicators.RSI
+        // returns length n-13 (first 14 bars undefined), so raw rsiValues[i] is shifted.
+        const rsiNorm = new Array(n).fill(null);
+        const offset = n - rsiValues.length;
+        for (let k = 0; k < rsiValues.length; k++) {
+            const v = rsiValues[k];
+            // Handle both {value: X} objects and raw numbers
+            const val = (typeof v === 'object' && v !== null) ? v.value : v;
+            if (val != null && isFinite(val)) rsiNorm[k + offset] = val;
+        }
+
         const look = Math.min(60, n);
         const start = n - look;
 
@@ -20,8 +32,8 @@ class DivergenceEngine {
                 if (candles[i].low  >= candles[i - j].low  || candles[i].low  >= candles[i + j].low)  isLL = false;
                 if (candles[i].high <= candles[i - j].high || candles[i].high <= candles[i + j].high) isHH = false;
             }
-            if (isLL && rsiValues[i] != null) pivotLows.push({ i, price: candles[i].low, rsi: rsiValues[i] });
-            if (isHH && rsiValues[i] != null) pivotHighs.push({ i, price: candles[i].high, rsi: rsiValues[i] });
+            if (isLL && rsiNorm[i] != null) pivotLows.push({ i, price: candles[i].low, rsi: rsiNorm[i] });
+            if (isHH && rsiNorm[i] != null) pivotHighs.push({ i, price: candles[i].high, rsi: rsiNorm[i] });
         }
 
         // Bullish divergence: compare last two pivot lows

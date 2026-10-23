@@ -115,8 +115,32 @@ class LiveTickClient:
         self._reconnect_count = 0
         self._tick_count = 0
         self._last_tick_ts = 0
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_kick = threading.Event()
 
     # ---------- lifecycle ----------
+    def _watchdog_loop(self):
+        """Detect 'zombie' WS: connected=True but no ticks for >45s during market hours → force reconnect."""
+        STALE_SEC = 45
+        while self._should_run:
+            self._watchdog_kick.wait(timeout=15)
+            self._watchdog_kick.clear()
+            if not self._should_run or not self._connected:
+                continue
+            # Only enforce staleness when we actually have subscriptions AND have seen at least one tick
+            if not self._subscribed or self._last_tick_ts == 0:
+                continue
+            age = time.time() - self._last_tick_ts
+            if age > STALE_SEC:
+                log.warning(f"⏰ WS stale ({age:.0f}s no ticks) — forcing reconnect")
+                try:
+                    ws = self._ws
+                    if ws is not None:
+                        try: ws.close_connection()
+                        except Exception: pass
+                except Exception:
+                    pass
+                self._connected = False
     def start(self, api_key: str, client_code: str, auth_token: str, feed_token: str, mode: int = 2):
         """Start the WebSocket client (idempotent)."""
         with self._lock:
@@ -135,6 +159,9 @@ class LiveTickClient:
             self._should_run = True
             self._ws_thread = threading.Thread(target=self._run_loop, name="angel-ws", daemon=True)
             self._ws_thread.start()
+            if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+                self._watchdog_thread = threading.Thread(target=self._watchdog_loop, name="angel-ws-watchdog", daemon=True)
+                self._watchdog_thread.start()
             return True
 
     def stop(self):
@@ -426,6 +453,8 @@ class LiveTickClient:
                 }
                 self._tick_count += 1
                 self._last_tick_ts = time.time()
+                try: self._watchdog_kick.set()
+                except Exception: pass
 
                 # Update forming candles for ALL timeframes we care about
                 self._update_formings(key, et, tok, ltp, delta_vol, tick_ts, day_open)

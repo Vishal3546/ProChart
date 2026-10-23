@@ -9,6 +9,13 @@ class CandlePatternEngine {
         const markers = [];
         if (!data || data.length < 10 || !settings || !settings.master) return markers;
 
+        // Hoisted time normalizer (handles LWC v5 seconds, ms, and {year,month,day} business-day objects)
+        const toSec = (t) => {
+            if (typeof t === 'number') return t > 1e10 ? Math.floor(t / 1000) : Math.floor(t);
+            if (t && typeof t === 'object' && t.year) return Math.floor(new Date(t.year, (t.month||1)-1, t.day||1).getTime() / 1000);
+            return Math.floor(new Date(t).getTime() / 1000);
+        };
+
         let lastIndex = -5;
         for (let i = 5; i < data.length; i++) {
             if (i - lastIndex < 4) continue;
@@ -34,7 +41,6 @@ class CandlePatternEngine {
                 if (data[j].high > curr.high) isSwingHigh = false;
             }
 
-            const toSec = (t) => (typeof t === 'number' && t > 1e10) ? Math.floor(t / 1000) : (typeof t === 'number' ? Math.floor(t) : Math.floor(new Date(t).getTime() / 1000));
             const cTime = toSec(curr.time);
 
             // HAMMER / SHOOTING STAR

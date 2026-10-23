@@ -40,12 +40,26 @@ class BreakoutScanner {
 
         const ema20 = ema(closes, 20);
         const ema50 = ema(closes, 50);
-        // ATR
+        // Wilder's ATR (TradingView standard — RMA smoothing)
         const trs = [];
         for (let i = 1; i < n; i++) {
-            trs.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i-1]), Math.abs(lows[i] - closes[i-1])));
+            trs.push(Math.max(
+                highs[i] - lows[i],
+                Math.abs(highs[i] - closes[i-1]),
+                Math.abs(lows[i] - closes[i-1])
+            ));
         }
-        const atr = sma(trs.slice(-14), Math.min(14, trs.length));
+        let atr = 0;
+        if (trs.length >= 14) {
+            // Seed with SMA of first 14 TRs
+            atr = trs.slice(0, 14).reduce((s, v) => s + v, 0) / 14;
+            // Wilder smoothing for rest
+            for (let i = 14; i < trs.length; i++) {
+                atr = (atr * 13 + trs[i]) / 14;
+            }
+        } else if (trs.length > 0) {
+            atr = trs.reduce((s, v) => s + v, 0) / trs.length;
+        }
 
         // ----- 1. Pivot level (20-bar high / low) -----
         const lookback = 20;
@@ -68,22 +82,35 @@ class BreakoutScanner {
         const volAvg5 = sma(vols.slice(-5), 5);
         const dryUp = volAvg5 < 0.85 * volAvg20;
 
-        // ----- 4. BB Squeeze -----
-        const mid = sma(closes, 20);
-        const sd = stdev(closes, 20, mid);
-        const bbWidth = (4 * sd) / mid;  // normalized band width
+        // Rolling BB width calc (O(n) — single pass)
         const bbWidths = [];
-        for (let i = 50; i <= n; i++) {
-            const m = sma(closes.slice(i-20, i), 20);
-            const s = stdev(closes.slice(i-20, i), 20, m);
-            bbWidths.push((4 * s) / m);
+        let rollSum = 0, rollSumSq = 0;
+        for (let i = 0; i < n; i++) {
+            rollSum += closes[i];
+            rollSumSq += closes[i] * closes[i];
+            if (i >= 20) {
+                rollSum -= closes[i - 20];
+                rollSumSq -= closes[i - 20] * closes[i - 20];
+            }
+            if (i >= 19) {
+                const m = rollSum / 20;
+                const variance = Math.max(0, (rollSumSq / 20) - (m * m));
+                const s = Math.sqrt(variance);
+                if (m > 0) bbWidths.push((4 * s) / m);
+            }
         }
-        const bbMedian = bbWidths.slice().sort((a,b) => a-b)[Math.floor(bbWidths.length / 2)];
-        const squeeze = bbWidth < bbMedian * 0.85;
+        const bbWidth = bbWidths.length ? bbWidths[bbWidths.length - 1] : 0;
+        const bbSorted = bbWidths.slice().sort((a, b) => a - b);
+        const bbMedian = bbSorted.length ? bbSorted[Math.floor(bbSorted.length / 2)] : bbWidth;
+        const squeeze = bbWidth > 0 && bbWidth < bbMedian * 0.85;
 
-        // ----- 5. RSI -----
+        // ----- 5. RSI (defensive parse: handles both {value} objects and raw numbers) -----
         const rsiArr = TechnicalIndicators.RSI(candles, 14);
-        const rsi = rsiArr.length ? rsiArr[rsiArr.length - 1].value : 50;
+        let rsi = 50;
+        if (rsiArr && rsiArr.length) {
+            const lastRsi = rsiArr[rsiArr.length - 1];
+            rsi = (typeof lastRsi === 'object' && lastRsi !== null) ? (lastRsi.value ?? 50) : (lastRsi ?? 50);
+        }
 
         // ----- 6. MACD -----
         const macd = TechnicalIndicators.MACD(candles);

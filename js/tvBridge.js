@@ -14,6 +14,7 @@ class TVBridge {
         this.currentData = [];
         this.paneEls = {};
         this._syncing = false;
+        this._syncingCrosshair = false;
         this._resizeObserver = null;
     }
 
@@ -250,6 +251,46 @@ class TVBridge {
 
         this._syncTimeScales();
         this._syncResize();
+        this._syncCrosshair();
+    }
+
+    // ---------- crosshair sync across panes (TradingView-style vertical line on all charts) ----------
+    _syncCrosshair() {
+        const keys = ['main', 'vol', 'rsi', 'macd'];
+        keys.forEach(src => {
+            const srcChart = this.charts[src];
+            const srcSeries = this.series[src === 'main' ? 'main' : src === 'vol' ? 'vol' : src] || this.series.main;
+            srcChart.subscribeCrosshairMove((param) => {
+                if (this._syncingCrosshair) return;
+                if (!param || (!param.point && !param.time)) {
+                    this._syncingCrosshair = true;
+                    try { keys.forEach(dst => { if (dst !== src) try { this.charts[dst].clearCrosshairPosition(); } catch(_){} }); }
+                    finally { this._syncingCrosshair = false; }
+                    return;
+                }
+                if (!param.point) return;
+                const x = param.point.x;
+                // Convert x-pixel → logical coordinate on src, then broadcast to all
+                const logical = srcChart.timeScale().coordinateToLogical(x);
+                if (logical == null) return;
+                this._syncingCrosshair = true;
+                try {
+                    keys.forEach(dst => {
+                        if (dst === src) return;
+                        try {
+                            const dstChart = this.charts[dst];
+                            const dstX = dstChart.timeScale().logicalToCoordinate(logical);
+                            if (dstX == null) return;
+                            const dstSeries = this.series[dst === 'main' ? 'main' : dst === 'vol' ? 'vol' : dst] || this.series.main;
+                            // Pass NaN price so LWC derives it from the series automatically
+                            dstChart.setCrosshairPosition(NaN, dstX, dstSeries);
+                        } catch(_) {}
+                    });
+                } finally {
+                    this._syncingCrosshair = false;
+                }
+            });
+        });
     }
 
     // ---------- data ----------

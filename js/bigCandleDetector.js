@@ -30,15 +30,26 @@ class BigCandleDetector {
         const avgBody = prior.reduce((s, c) => s + Math.abs(c.close - c.open), 0) / prior.length;
         const avgVol  = prior.reduce((s, c) => s + (c.volume || 0), 0) / prior.length;
 
-        // Candle completion % (for intraday only)
+        // Need meaningful avgBody — else skip (all-doji base = no signal)
+        if (avgBody <= 0 || avgVol <= 0) {
+            return { ...defaults, magnitude: 0, volRatio: 0 };
+        }
+
+        // Normalize last.time to seconds (handles ms, s, or {year,month,day} business-day objects from LWC v5)
+        const _toSec = (t) => {
+            if (typeof t === 'number') return t > 1e10 ? Math.floor(t / 1000) : Math.floor(t);
+            if (t && typeof t === 'object' && t.year) return Math.floor(new Date(t.year, (t.month||1)-1, t.day||1).getTime() / 1000);
+            return Math.floor(new Date(t).getTime() / 1000);
+        };
+        const lastTimeSec = _toSec(last.time);
         const now = Math.floor(Date.now() / 1000);
-        const sinceStart = now - last.time;
-        const pct = tfSec > 0 ? sinceStart / tfSec : 1;
+        const sinceStart = Math.max(0, now - lastTimeSec);
+        const pct = tfSec > 0 ? Math.min(sinceStart / tfSec, 1) : 1;
 
         // Don't fire at <40% (too early — noise) or >95% (candle already closed)
         const forming = pct >= 0.4 && pct < 0.95;
-        const mag = body / (avgBody || 1);
-        const volRatio = (last.volume || 0) / (avgVol || 1);
+        const mag = body / avgBody;
+        const volRatio = (last.volume || 0) / avgVol;
         const bigEnough = mag >= 1.8 && volRatio >= 1.2;
 
         const key = `${last.time}_${dir}`;

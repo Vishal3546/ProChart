@@ -16,14 +16,21 @@ class DoubleBottomEngine {
         const lows   = candles.map(c => c.low);
         const vols   = candles.map(c => c.volume || 0);
 
-        // Find swing lows over last 60 bars
+        // Find swing lows over last 60 bars (asymmetric window near current bar)
         const lows_arr = [];
         const look = Math.min(60, n - 3);
-        for (let i = n - 4; i >= n - look; i--) {
-            const w = 3;
+        for (let i = n - 2; i >= n - look; i--) {
+            const wL = 3;
+            const wR = Math.min(3, n - 1 - i); // shrink right-window near current bar
+            if (wR < 1) continue;
             let isPivot = true;
-            for (let j = 1; j <= w; j++) {
-                if (lows[i] >= lows[i - j] || lows[i] >= lows[i + j]) { isPivot = false; break; }
+            for (let j = 1; j <= wL; j++) {
+                if (i - j < 0 || lows[i] >= lows[i - j]) { isPivot = false; break; }
+            }
+            if (isPivot) {
+                for (let j = 1; j <= wR; j++) {
+                    if (lows[i] >= lows[i + j]) { isPivot = false; break; }
+                }
             }
             if (isPivot) lows_arr.push({ i, val: lows[i] });
             if (lows_arr.length >= 4) break;
@@ -55,13 +62,20 @@ class DoubleBottomEngine {
             }
         }
 
-        // Mirror: double top
+        // Mirror: double top (same asymmetric window)
         const highs_arr = [];
-        for (let i = n - 4; i >= n - look; i--) {
-            const w = 3;
+        for (let i = n - 2; i >= n - look; i--) {
+            const wL = 3;
+            const wR = Math.min(3, n - 1 - i);
+            if (wR < 1) continue;
             let isPivot = true;
-            for (let j = 1; j <= w; j++) {
-                if (highs[i] <= highs[i - j] || highs[i] <= highs[i + j]) { isPivot = false; break; }
+            for (let j = 1; j <= wL; j++) {
+                if (i - j < 0 || highs[i] <= highs[i - j]) { isPivot = false; break; }
+            }
+            if (isPivot) {
+                for (let j = 1; j <= wR; j++) {
+                    if (highs[i] <= highs[i + j]) { isPivot = false; break; }
+                }
             }
             if (isPivot) highs_arr.push({ i, val: highs[i] });
             if (highs_arr.length >= 4) break;

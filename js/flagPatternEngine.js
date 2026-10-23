@@ -12,10 +12,12 @@ class FlagPatternEngine {
         const closes = candles.map(c => c.close);
         const highs = candles.map(c => c.high);
         const lows = candles.map(c => c.low);
-        const atr = TechnicalIndicators.ATR(candles, 14);
-
-        const curAtr = atr[n - 1];
-        if (!curAtr || curAtr <= 0) return { detected: false, label: '⚪ NONE', level: 'muted', dir: null };
+        const atrArr = TechnicalIndicators.ATR(candles, 14) || [];
+        const lastAtr = atrArr[atrArr.length - 1];
+        const curAtr = (typeof lastAtr === 'object' && lastAtr !== null) ? lastAtr.value : lastAtr;
+        if (!curAtr || !isFinite(curAtr) || curAtr <= 0) {
+            return { detected: false, label: '⚪ NONE', level: 'muted', dir: null };
+        }
 
         // Look back over last 25 bars for an impulse
         for (let impLen = 4; impLen <= 9; impLen++) {
