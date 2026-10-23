@@ -86,7 +86,7 @@ POPULAR_TOKENS = [
     {"symbol": "SBIN",      "name": "STATE BANK OF INDIA",    "token": "3045",     "exchange": "NSE", "base": 780.30},
     {"symbol": "TATASTEEL", "name": "TATA STEEL",             "token": "3499",     "exchange": "NSE", "base": 160.20},
     {"symbol": "ICICIBANK", "name": "ICICI BANK LTD",         "token": "4963",     "exchange": "NSE", "base": 1080.70},
-    {"symbol": "BHARTIARTL","name": "BHARTI AIRTEL",          "token": "10999",    "exchange": "NSE", "base": 1650.00},
+    {"symbol": "BHARTIARTL","name": "BHARTI AIRTEL",          "token": "10604",    "exchange": "NSE", "base": 1650.00},
     {"symbol": "LT",        "name": "LARSEN & TOUBRO",        "token": "11483",    "exchange": "NSE", "base": 3700.00},
     {"symbol": "AXISBANK",  "name": "AXIS BANK",              "token": "5900",     "exchange": "NSE", "base": 1180.00},
     {"symbol": "ITC",       "name": "ITC LTD",                "token": "1660",     "exchange": "NSE", "base": 490.00},
