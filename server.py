@@ -311,7 +311,7 @@ CANDLE_TTL = 60.0        # candle cache TTL (1 minute — very conservative for 
 RATE_LIMIT_BACKOFF = 300 # 5 minutes after first hit
 _inflight_candle = {}    # per cache_key: single-flight guard
 _last_candle_req = None  # monotonic timestamp of last Angel candle call (global throttle)
-GLOBAL_CANDLE_GAP = 2.5  # MINIMUM 2.5 seconds between any two Angel historical calls (Angel allows ~3/sec; heavy safety buffer to avoid WAF)
+GLOBAL_CANDLE_GAP = 3.5  # MINIMUM 3.5s between Angel historical calls (heavy safety against WAF; Angel allows ~3/sec)
 rate_limited_candles = {}
 rate_limited_quotes = {}
 _last_quote_req = 0.0    # global throttle for quote REST
@@ -350,6 +350,13 @@ def _simulated_response(symbol, token, exchange, interval, market_open, candles=
                 base = qd["ltp"]
     except Exception:
         pass
+    # Fallback: WS real-time LTP (most current price, even if REST quote is stale/blocked)
+    if not base or base <= 0:
+        try:
+            ws_p = live_ws.ltp(exchange, str(token))
+            if ws_p and ws_p > 0: base = ws_p
+        except Exception:
+            pass
     if candles is not None and len(candles) > 0:
         return {"status":"success","source":source,"candles":candles,"market_open":market_open,"stale":True}
     if base is None or base <= 0:
@@ -698,16 +705,15 @@ async def get_candles(
         retry_after = int(per_key_until - mono) + 1
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
-        # Graceful: return SIMULATED anchored fallback instead of hard 429 so chart never goes blank
-        return _merge_live_candle(_simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="Cooldown"),
-                                  exchange, token, interval, market_open)
+        # Return EMPTY loading state — DO NOT generate simulated candles during cooldown.
+        # Simulated here would anchor to random/wrong base price and cause "316 range" bug.
+        return {"status":"success","source":"Cooldown","candles":[],"market_open":market_open,"loading":True,"cooldown":True,"retry_after":retry_after}
 
     # --- 3. Single-flight dedup ---
     if cache_key in _inflight_candle:
         if cache_key in candle_cache and candle_cache[cache_key][1].get("candles"):
             return _merge_live_candle(candle_cache[cache_key][1], exchange, token, interval, market_open)
-        return _merge_live_candle(_simulated_response(symbol, token, exchange, interval, market_open, candles=None, source="InFlight"),
-                                  exchange, token, interval, market_open)
+        return {"status":"success","source":"InFlight","candles":[],"market_open":market_open,"loading":True}
 
     # --- 4. Global throttle: MIN 3s gap between ANY two Angel historical calls ---
     global _last_candle_req
@@ -751,16 +757,28 @@ async def get_candles(
         except Exception as e:
             err = str(e); data = None
 
-        # Check for rate-limit / WAF reject
+        # Check for rate-limit / WAF reject OR connection timeout (Angel temp-blocking our IP)
         rate_hit = False
-        if err and ("Access denied" in err or "exceeding access rate" in err or "Couldn't parse the JSON" in err):
-            rate_hit = True
+        is_timeout = False
+        if err:
+            if "Access denied" in err or "exceeding access rate" in err or "Couldn't parse the JSON" in err:
+                rate_hit = True
+            if "timed out" in err.lower() or "timeout" in err.lower() or "Max retries" in err:
+                is_timeout = True
         if isinstance(data, (bytes, str)) and ("Access denied" in str(data) or "exceeding access rate" in str(data)):
             rate_hit = True
         if isinstance(data, dict) and not data.get("status"):
             msg = str(data.get("message",""))
             if "Access denied" in msg or "exceeding access rate" in msg:
                 rate_hit = True
+
+        # If Angel timed out (IP temp-blocked from flood), trip per-key cooldown immediately
+        # without hammering with retry — retry just extends the block.
+        if is_timeout:
+            rate_limited_candles[cache_key] = time.monotonic() + 60
+            print(f"⏱️ Angel TIMEOUT for {cache_key} — likely temp WAF block, cooldown 60s")
+            data = None; err = None
+            break
 
         if rate_hit:
             _inflight_candle.pop(cache_key, None)

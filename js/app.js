@@ -104,27 +104,27 @@ class App {
 
     // --------------- LIVE WS (SSE) ---------------
     connectLiveStream() {
-        // Passive tabs / pre-election tabs NEVER open their own SSE/WS (would duplicate streams and hit WAF).
-        // isLeaderTab is ONLY true AFTER the leader election completes (setTimeout(0-700ms) in startLiveQuotePolling).
         if (this._passiveTab || this._isLeaderTab === false) return;
         const symKey = `${this.activeExchange}:${this.activeToken}`;
         const fullKey = `${symKey}:${this.activeTimeframe}`;
 
         // Skip ENTIRELY if already subscribed to same (token+TF) — idempotent fast path
-        if (this._lastSubKey === fullKey && this.liveEventSource && this.liveEventSource.readyState === 1 && (Date.now()-(this._lastSubAt||0)) < 30000) {
+        if (this._lastSubKey === fullKey && this.liveEventSource && this.liveEventSource.readyState === 1) {
             return;
         }
+        // Also skip if we switched to this TF VERY recently (<1.5s ago) — SSE is still establishing
+        if (this._lastSubKey === fullKey && (Date.now()-(this._lastSubAt||0)) < 1500) return;
 
         // Always close old SSE first
         if (this.liveEventSource) {
             try { this.liveEventSource.close(); } catch (e) {}
             this.liveEventSource = null;
         }
-        // Tell server to drop stale SSEs for this token
-        try { fetch('/api/ws/unsubscribe', { method:'POST', cache:'no-store' }).catch(()=>{}); } catch(e){}
+        // Only call unsubscribe if we actually HAD an old SSE (avoid pointless POST on first-load)
+        if (this._lastSubKey) {
+            try { fetch('/api/ws/unsubscribe', { method:'POST', cache:'no-store' }).catch(()=>{}); } catch(e){}
+        }
 
-        // Only do a backend /api/ws/subscribe POST if the TOKEN changed (same symbol = same WS tick).
-        // Pure TF switch doesn't need new WS subscribe — just new SSE interval bucket.
         const tokenChanged = (this._lastSubSymKey !== symKey);
         this._lastSubKey = fullKey;
         this._lastSubSymKey = symKey;
@@ -327,7 +327,7 @@ class App {
                 e.currentTarget.classList.add('active');
                 this.activeTimeframe = tf;
                 localStorage.setItem('prochart_tf', this.activeTimeframe);
-                // Debounce 200ms (TradingView-style snappy feel) + abort previous fetch
+                // Debounce 800ms + abort previous fetch (avoids hammering Angel on rapid TF clicks)
                 if (this._pendingLoadTimer) clearTimeout(this._pendingLoadTimer);
                 if (this._pendingLoadAbort) this._pendingLoadAbort.abort();
                 this._pendingLoadAbort = new AbortController();
@@ -335,7 +335,7 @@ class App {
                 this._pendingLoadTimer = setTimeout(() => {
                     if (abortSig.aborted) return;
                     this.loadChartData(this.activeSymbol, this.activeTimeframe);
-                }, 200);
+                }, 800);
             });
         });
     }
