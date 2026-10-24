@@ -189,10 +189,14 @@ class App {
 
     _onLiveCandle(c) {
         if (!c) return;
+        // v44: reject ticks with non-finite OHLC before they reach LWC (would throw "Value is null")
+        const o = +c.open, h = +c.high, l = +c.low, cl = +c.close;
+        if (!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(cl)) return;
+        if (!(o > 0) || !(cl > 0) || !(h >= l)) return;
         // Push forming candle into the bridge (updates the last bar + volume in-place)
         this.tvBridge.updateTick({
-            time: c.time, open: c.open, high: c.high, low: c.low,
-            close: c.close, volume: c.volume || 0,
+            time: c.time, open: o, high: h, low: l,
+            close: cl, volume: isFinite(+c.volume) ? +c.volume : 0,
         });
         // Keep currentData in sync for analytics
         if (this.tvBridge.currentData && this.tvBridge.currentData.length) {
@@ -750,12 +754,13 @@ class App {
 
         // Master Pro dashboard — always show values, but skip feed push when not live
         try {
-            const mp = this.proEngine.analyze(data);
-            this._setMetric('signalSqueeze', mp.squeeze.label, mp.squeeze.level);
-            this._setMetric('signalVsa', mp.vsa.label, mp.vsa.level);
-            this._setMetric('signalMacd', mp.macd.label, mp.macd.level);
-            this._setMetric('signalRsi', mp.rsi.label, mp.rsi.level);
-            if (isRealData) this._pushFeed(`MASTER: ${mp.macd.label} / ${mp.vsa.label}`, mp.score >= 1 ? 'bull' : (mp.score <= -1 ? 'bear' : 'neut'), 'master');
+            const mp = this.proEngine.analyze(data) || {};
+            const sq = mp.squeeze || {}, vs = mp.vsa || {}, mc = mp.macd || {}, rs = mp.rsi || {};
+            this._setMetric('signalSqueeze', sq.label || '—', sq.level || 'muted');
+            this._setMetric('signalVsa', vs.label || '—', vs.level || 'muted');
+            this._setMetric('signalMacd', mc.label || '—', mc.level || 'muted');
+            this._setMetric('signalRsi', rs.label || '—', rs.level || 'muted');
+            if (isRealData) this._pushFeed(`MASTER: ${mc.label || '—'} / ${vs.label || '—'}`, (mp.score || 0) >= 1 ? 'bull' : ((mp.score || 0) <= -1 ? 'bear' : 'neut'), 'master');
         } catch (e) { console.warn('masterPro err', e); }
 
         // Breakout checklist
@@ -1008,12 +1013,13 @@ class App {
     _repaintWorkerPanels(data, isRealData) {
         // Batch B (worker-backed panels) — uses thin wrappers that read analyticsBridge._latest
         try {
-            const mp = this.proEngine.analyze(data);
-            this._setMetric('signalSqueeze', mp.squeeze.label, mp.squeeze.level);
-            this._setMetric('signalVsa', mp.vsa.label, mp.vsa.level);
-            this._setMetric('signalMacd', mp.macd.label, mp.macd.level);
-            this._setMetric('signalRsi', mp.rsi.label, mp.rsi.level);
-            if (isRealData && mp.score !== undefined) this._pushFeed(`MASTER: ${mp.macd.label} / ${mp.vsa.label}`, mp.score >= 1 ? 'bull' : (mp.score <= -1 ? 'bear' : 'neut'), 'master');
+            const mp = this.proEngine.analyze(data) || {};
+            const sq = mp.squeeze || {}, vs = mp.vsa || {}, mc = mp.macd || {}, rs = mp.rsi || {};
+            this._setMetric('signalSqueeze', sq.label || '—', sq.level || 'muted');
+            this._setMetric('signalVsa', vs.label || '—', vs.level || 'muted');
+            this._setMetric('signalMacd', mc.label || '—', mc.level || 'muted');
+            this._setMetric('signalRsi', rs.label || '—', rs.level || 'muted');
+            if (isRealData && mp.score !== undefined) this._pushFeed(`MASTER: ${mc.label || '—'} / ${vs.label || '—'}`, (mp.score || 0) >= 1 ? 'bull' : ((mp.score || 0) <= -1 ? 'bear' : 'neut'), 'master');
         } catch (e) {}
         try {
             if (this.patternSettings.vcp) {

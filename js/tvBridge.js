@@ -42,7 +42,23 @@ class TVBridge {
             .sort((a, b) => a.time - b.time);
     }
     _mapArr(values) {
-        return this.currentData.map((d, i) => ({ time: this._toSec(d.time), value: values[i] }));
+        // 🚀 v44: Lightweight Charts v5 throws "Value is null" on any NaN/undefined/Infinity/null
+        // entry. Strictly filter to finite numbers only.
+        if (!this.currentData || !values) return [];
+        const out = [];
+        for (let i = 0; i < this.currentData.length; i++) {
+            const d = this.currentData[i];
+            const v = values[i];
+            if (v == null || typeof v !== 'number' || !isFinite(v)) continue;
+            out.push({ time: this._toSec(d.time), value: v });
+        }
+        return out;
+    }
+
+    /** Drop any row whose value is null/undefined/NaN/Infinity */
+    _filterValid(arr) {
+        if (!Array.isArray(arr)) return [];
+        return arr.filter(d => d && d.time != null && d.value != null && typeof d.value === 'number' && isFinite(d.value));
     }
 
     // ---------- layout ----------
@@ -334,12 +350,13 @@ class TVBridge {
     }
 
     _anchorToLatest(n) {
-        // TradingView-style: show last ~120 bars (not all bars shrunken), then scroll to realtime.
+        // 🚀 TradingView default: ~80 bars visible (60–90 depending on screen width).
+        // You can still scroll left — full history is in memory.
         const apply = () => {
             if (!this.charts || !this.charts.main) return;
             if (!this.currentData || this.currentData.length < 2) return;
             const total = this.currentData.length;
-            const visible = Math.min(120, total);       // show last 120 bars by default
+            const visible = Math.min(80, total);        // v44: 80 bars (TradingView default, not 120)
             const from = Math.max(0, total - visible);
             const to = total + 6;                        // +6 right-offset for breathing room
             ['main','vol','rsi','macd'].forEach(k => {
@@ -368,8 +385,9 @@ class TVBridge {
         if (!isFinite(hh) || !isFinite(ll) || hh < ll) return;
         if (o <= 0 || c <= 0) return;
         try { this.series.main.update({ time: ts, open: o, high: hh, low: ll, close: c }); } catch(_){}
+        const volv = +(candle.volume || 0);
         try { this.series.vol.update({
-            time: ts, value: +(candle.volume || 0),
+            time: ts, value: isFinite(volv) ? volv : 0,
             color: c >= o ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
         }); } catch(_){}
     }
@@ -378,7 +396,7 @@ class TVBridge {
     _setOverlay(key, series, data) {
         if (this.overlays[key]) { try { this.charts.main.removeSeries(this.overlays[key]); } catch (e) {} }
         this.overlays[key] = series;
-        series.setData(data.filter(d => d.value !== null && d.value !== undefined).sort((a, b) => a.time - b.time));
+        series.setData(this._filterValid(data).sort((a, b) => a.time - b.time));
     }
     _removeOverlay(key) {
         if (this.overlays[key]) {
@@ -410,7 +428,7 @@ class TVBridge {
             color: '#E040FB', lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
             title: 'VWAP', crosshairMarkerVisible: false, lineStyle: LightweightCharts.LineStyle.Dashed,
         });
-        series.setData(this._mapArr(vwap).filter(d => d.value !== null));
+        series.setData(this._filterValid(this._mapArr(vwap)));
         this.overlays.vwap = series;
     }
     addBollinger() {
@@ -420,7 +438,7 @@ class TVBridge {
             const s = this.charts.main.addSeries(LightweightCharts.LineSeries, {
                 color, lineWidth: 1, priceLineVisible: false, crosshairMarkerVisible: false, ...opts,
             });
-            s.setData(this._mapArr(data).filter(d => d.value !== null));
+            s.setData(this._filterValid(this._mapArr(data)));
             return s;
         };
         this.overlays.bbUpper = mk('rgba(33,150,243,0.7)', bb.upper, { lastValueVisible: false, title: 'BB Upper' });
@@ -437,7 +455,7 @@ class TVBridge {
             color: '#26a69a', lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
             title: 'SuperTrend', crosshairMarkerVisible: false,
         });
-        series.setData(this._mapArr(st.trend).filter(d => d.value !== null));
+        series.setData(this._filterValid(this._mapArr(st.trend)));
         this.overlays.supertrend = series;
     }
     removeSuperTrend() { this._removeOverlay('supertrend'); }
@@ -448,9 +466,10 @@ class TVBridge {
         const histMap = [], fastMap = [], slowMap = [];
         this.currentData.forEach((d, i) => {
             const ts = this._toSec(d.time);
-            if (macdObj.hist[i] != null) histMap.push({ time: ts, value: macdObj.hist[i], color: macdObj.hist[i] >= 0 ? '#089981' : '#f23645' });
-            if (macdObj.macd[i] != null) fastMap.push({ time: ts, value: macdObj.macd[i] });
-            if (macdObj.signal[i] != null) slowMap.push({ time: ts, value: macdObj.signal[i] });
+            const hv = macdObj.hist[i], fv = macdObj.macd[i], sv = macdObj.signal[i];
+            if (hv != null && isFinite(hv)) histMap.push({ time: ts, value: hv, color: hv >= 0 ? '#089981' : '#f23645' });
+            if (fv != null && isFinite(fv)) fastMap.push({ time: ts, value: fv });
+            if (sv != null && isFinite(sv)) slowMap.push({ time: ts, value: sv });
         });
         this.series.macdHist.setData(histMap);
         this.series.macdFast.setData(fastMap);
@@ -470,7 +489,7 @@ class TVBridge {
         if (!this.series.rsi) return;
         try {
             const rsiData = TechnicalIndicators.RSI(this.currentData, period);
-            const mapped = this._mapArr(rsiData).filter(d => d.value != null && isFinite(d.value));
+            const mapped = this._filterValid(this._mapArr(rsiData));
             this.series.rsi.setData(mapped);
             this.series.rsi.applyOptions({
                 autoscaleInfoProvider: () => ({
