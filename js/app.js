@@ -174,12 +174,14 @@ class App {
 
     _onLiveTick(t) {
         if (!t || !t.ltp) return;
-        const prevClose = this.prevClose || t.prev_close || t.ltp;
+        // Priority: WS prev_close (100% accurate from server) > calculated prevClose > LTP
+        const prev = t.prev_close || this.prevClose || t.ltp;
+        this.prevClose = prev; // lock in the authoritative prevClose for header % calculation
         this.lastLtp = t.ltp;
         this._lastWsTickAt = Date.now();
         // Resolve initial candle wait if this is the first live tick
         if (this._initCandleWait) { const cb = this._initCandleWait; this._initCandleWait = null; cb(); }
-        this.updateHeaderPrice(t.ltp, t.ltp - prevClose);
+        this.updateHeaderPrice(t.ltp, t.ltp - prev, prev);
         const spot = document.getElementById('greekSpot');
         if (spot) spot.value = t.ltp.toFixed(2);
         // Up → green, Down → red (no pulse animation; static color only)
@@ -581,7 +583,7 @@ class App {
                 requestAnimationFrame(() => { this.applyIndicators(); this.runAllAnalytics(saneInst); });
                 const last = saneInst[saneInst.length - 1];
                 this.lastLtp = last.close;
-                this.prevClose = this._findDayOpen(saneInst, tf);
+                this.prevClose = this._findPrevClose(saneInst, tf);
                 this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
                 this.setConnectionStatus(false, 'Cached');
                 const sp = document.getElementById('greekSpot'); if (sp) sp.value = last.close.toFixed(2);
@@ -657,7 +659,7 @@ class App {
                 this.runAllAnalytics(candles);
             });
             const last = candles[candles.length - 1];
-            this.prevClose = this._findDayOpen(candles, tf);
+            this.prevClose = this._findPrevClose(candles, tf);
             this.lastLtp = last.close;
             const sp = document.getElementById('greekSpot'); if (sp && this.lastLtp) sp.value = this.lastLtp.toFixed(2);
             this.updateHeaderPrice(last.close, last.close - this.prevClose, this.prevClose);
@@ -690,18 +692,26 @@ class App {
         return sane;
     }
 
-    /** Find today's day-open from a candle array (first bar >= 09:15 IST intraday, prev-day close for D) */
-    _findDayOpen(candles, tf) {
-        if (!candles || !candles.length) return candles?.[0]?.open || 0;
+    /** Find Yesterday's Close — NSE / TradingView standard daily % change baseline.
+     *  Walks backwards from last candle to find the last close BEFORE today's 09:15 IST session.
+     *  This matches what NSE/Kite/TradingView show (prev day close, NOT today's open). */
+    _findPrevClose(candles, tf) {
+        if (!candles || !candles.length) return 0;
         if (tf === 'D') return candles.length > 1 ? candles[candles.length-2].close : candles[0].open;
-        const now = new Date();
-        const istOffset = 5.5*3600*1000;
-        const istNow = new Date(now.getTime()+istOffset);
-        const istY = istNow.getUTCFullYear(), istM = istNow.getUTCMonth(), istD = istNow.getUTCDate();
-        const dayStart = Date.UTC(istY, istM, istD, 3, 45, 0);
-        for (let i=0; i<candles.length; i++) {
-            if (candles[i].time*1000 >= dayStart) return candles[i].open;
+
+        // day-start in UTC seconds for the LAST candle's IST date (session boundary 03:45 UTC = 09:15 IST)
+        const lastTime = candles[candles.length - 1].time * 1000;
+        const d = new Date(lastTime + 5.5 * 3600 * 1000);
+        d.setUTCHours(0, 0, 0, 0);
+        const dayStartUnix = (d.getTime() - 5.5 * 3600 * 1000) / 1000;
+
+        // Walk backwards to find the first candle BEFORE today (yesterday's last bar)
+        for (let i = candles.length - 1; i >= 0; i--) {
+            if (candles[i].time < dayStartUnix) {
+                return candles[i].close;
+            }
         }
+        // Fallback: only today's data available — use first bar open
         return candles[0].open;
     }
 
@@ -1184,10 +1194,10 @@ class App {
     updateHeaderPrice(ltp, diff, prevClose) {
         const ltpEl = document.getElementById('activeLtp');
         const chgEl = document.getElementById('activeChange');
-        const prev = prevClose || this.prevClose || ltp;
+        const prev = (prevClose && prevClose > 0) ? prevClose : (this.prevClose || ltp);
         if (ltpEl) {
-            ltpEl.innerText = ltp.toFixed(2);
-            ltpEl.classList.remove('flash-up', 'flash-down', 'text-success', 'text-danger');
+            ltpEl.innerText = Number(ltp).toFixed(2);
+            ltpEl.classList.remove('flash-up', 'flash-down', 'text-success', 'text-danger', 'text-muted');
             void ltpEl.offsetWidth;
             if (diff > 0) {
                 ltpEl.classList.add('flash-up', 'text-success');
@@ -1198,8 +1208,10 @@ class App {
             }
         }
         if (chgEl) {
-            const pct = prev ? (diff / prev) * 100 : 0;
-            chgEl.innerText = `${diff >= 0 ? '+' : ''}${diff.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
+            // NSE / TradingView standard: % change vs PREVIOUS DAY CLOSE (not today's open)
+            const pct = prev > 0 ? (diff / prev) * 100 : 0;
+            const sign = diff > 0 ? '+' : '';
+            chgEl.innerText = `${sign}${diff.toFixed(2)} (${sign}${pct.toFixed(2)}%)`;
             chgEl.style.color = diff > 0 ? '#089981' : (diff < 0 ? '#f23645' : '#787b86');
         }
     }

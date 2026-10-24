@@ -22,7 +22,7 @@ class TradingPlanEngine {
     plan(candles, bias) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.tradePlan) || { ready: false, reason: 'No strong bias yet' }; }
 }
 class TrendBiasEngine {
-    analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.trendBias) || { score: 0, label: 'NEUTRAL', level: 'muted', bias: 'neutral', factors: {} }; }
+    analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.trendBias) || { score: 0, label: '⚪ NEUTRAL / CHOP', level: 'muted', bias: 'neutral', factors: { vwap: 0, ema: 0, rsi: 0 } }; }
 }
 class VCPPatternEngine {
     scan(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.vcp) || { detected: false, label: '⚪ NO VCP', level: 'muted' }; }
