@@ -5,7 +5,15 @@
  * rendering continues to work until first worker result arrives.
  * ============================================================ */
 class MasterProEngine {
-    analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.masterPro) || {}; }
+    analyze(candles) {
+        return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.masterPro) || {
+            squeeze: { active: false, label: '—', level: 'muted' },
+            vsa: { label: '—', level: 'muted' },
+            macd: { label: '—', level: 'muted' },
+            rsi: { label: '—', level: 'muted' },
+            score: 0
+        };
+    }
 }
 class NextCandlePredictor {
     analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.nextCandle) || { direction: 'neutral', score: 0, confidence: 'low', factors: [] }; }
