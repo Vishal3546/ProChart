@@ -310,7 +310,11 @@ class TVBridge {
             if (!(h >= l) || !(o > 0) || !(c > 0)) continue;
             if (seen.has(t)) continue;
             seen.add(t);
-            rows.push({ time: t, open: o, high: Math.max(o, h, c), low: Math.min(o, l, c), close: c, volume: d.volume });
+            const hh = Math.max(o, h, c);
+            const ll = Math.min(o, l, c);
+            if (!isFinite(hh) || !isFinite(ll) || hh < ll) continue;
+            const vol = (d.volume == null || !isFinite(+d.volume)) ? 0 : +d.volume;
+            rows.push({ time: t, open: o, high: hh, low: ll, close: c, volume: vol });
         }
         if (rows.length < 2) return;
         rows.sort((a, b) => a.time - b.time);
@@ -320,8 +324,12 @@ class TVBridge {
             time: d.time, value: +(d.volume || 0),
             color: d.close >= d.open ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',
         }));
-        try { this.series.main.setData(fmt); } catch(e) { console.warn('main.setData', e.message); }
-        try { this.series.vol.setData(vFmt); } catch(e) { console.warn('vol.setData', e.message); }
+        try {
+            if (fmt.length >= 2) this.series.main.setData(fmt);
+        } catch (e) { console.warn('main.setData', e && e.message); }
+        try {
+            if (vFmt.length >= 2) this.series.vol.setData(vFmt);
+        } catch (e) { console.warn('vol.setData', e && e.message); }
         this._anchorToLatest(rows.length);
     }
 
@@ -356,8 +364,10 @@ class TVBridge {
         if (last && ts < last) return;  // silently drop out-of-order ticks (SSE replay safety)
         const o = +candle.open, h = +candle.high, l = +candle.low, c = +candle.close;
         if (!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(c)) return;
-        if (!(h >= l) || o <= 0 || c <= 0) return;
-        try { this.series.main.update({ time: ts, open: o, high: h, low: l, close: c }); } catch(_){}
+        const hh = Math.max(o, h, c), ll = Math.min(o, l, c);
+        if (!isFinite(hh) || !isFinite(ll) || hh < ll) return;
+        if (o <= 0 || c <= 0) return;
+        try { this.series.main.update({ time: ts, open: o, high: hh, low: ll, close: c }); } catch(_){}
         try { this.series.vol.update({
             time: ts, value: +(candle.volume || 0),
             color: c >= o ? 'rgba(8,153,129,0.65)' : 'rgba(242,54,69,0.65)',

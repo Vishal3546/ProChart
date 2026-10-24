@@ -357,41 +357,44 @@ function evalPreMarket(d){
     return{pivot:+p.toFixed(2),bc:+bc.toFixed(2),tc:+tc.toFixed(2),r1:+(2*p-l).toFixed(2),s1:+(2*p-h).toFixed(2),cprWidth:+Math.abs(tc-bc).toFixed(2)};
 }
 function evalTradePlan(d,cap=100000,riskP=0.01){
+    const _fail=(r)=>({ready:false,reason:r,direction:'NEUTRAL',actionable:false,pending:false,ltp:0,entry:0,sl:0,t1:0,t2:0,risk_per_share:0,rr1:0,rr2:0,dist_pct:0,atr:0,qty_at_risk:0,capital_used:cap,risk_pct:+(riskP*100).toFixed(2),verdict:r,entryReason:'—',slReason:'—',t1Reason:'—'});
     const{n,highs,lows,closes}=d;
-    if(n<30)return{ready:false,reason:'Insufficient data'};
-    const ltp=closes[n-1],atrA=rmaATR(highs,lows,closes,14),atr=atrA[n-1];
-    if(!atr||atr<=0)return{ready:false,reason:'ATR Zero'};
+    if(n<30)return _fail('Insufficient data');
+    const ltp=closes[n-1];
+    if(!isFinite(ltp)||ltp<=0)return _fail('Bad LTP');
+    const atrA=rmaATR(highs,lows,closes,14),atr=atrA[n-1];
+    if(!isFinite(atr)||atr<=0)return _fail('ATR Zero');
     const ema20=emaArr(closes,20)[n-1],isBull=ltp>=ema20;
     const sl=isBull?ltp-1.5*atr:ltp+1.5*atr;
     const t1=isBull?ltp+1.5*atr:ltp-1.5*atr;
     const t2=isBull?ltp+3.0*atr:ltp-3.0*atr;
-    const risk=Math.abs(ltp-sl),qty=risk>0?Math.floor((cap*riskP)/risk):0;
-    return{ready:true,direction:isBull?'LONG':'SHORT',entry:+ltp.toFixed(2),sl:+sl.toFixed(2),t1:+t1.toFixed(2),t2:+t2.toFixed(2),risk_per_share:+risk.toFixed(2),qty_at_risk:qty,verdict:'✅ High Probability Plan (1:2 RR)'};
+    const risk=Math.abs(ltp-sl),reward1=Math.abs(t1-ltp);
+    const rr1=risk>0?reward1/risk:0,rr2=risk>0?(Math.abs(t2-ltp)/risk):0;
+    const qty=risk>0?Math.floor((cap*riskP)/risk):0;
+    return{ready:true,direction:isBull?'LONG':'SHORT',actionable:false,pending:true,ltp:+ltp.toFixed(2),entry:+ltp.toFixed(2),entryReason:'LTP',sl:+sl.toFixed(2),slReason:'1.5 ATR stop',t1:+t1.toFixed(2),t2:+t2.toFixed(2),t1Reason:'1.5x Risk',risk_per_share:+risk.toFixed(2),rr1:+rr1.toFixed(2),rr2:+rr2.toFixed(2),dist_pct:0,atr:+atr.toFixed(2),qty_at_risk:qty,capital_used:cap,risk_pct:+(riskP*100).toFixed(2),verdict:'✅ High Probability Plan (1:2 RR)'};
 }
 function evalTrendBias(d){
     const{n,times,highs,lows,closes,vols}=d;
-    if(n<30)return{score:0,label:'NEUTRAL',level:'muted',bias:'neutral'};
+    if(n<30)return{score:0,label:'NEUTRAL / CHOP',level:'muted',bias:'neutral',factors:{vwap:0,ema:0,rsi:0}};
     const c=n-1,e20=emaArr(closes,20)[c],e50=emaArr(closes,50)[c],vw=vwapSession(times,highs,lows,closes,vols)[c];
     const rs=rsiArr(closes,14)[c];
-    let sc=0;
-    if(closes[c]>=vw)sc+=1;else sc-=1;
-    if(e20>e50)sc+=1;else sc-=1;
-    if(isFinite(rs)&&rs>50)sc+=1;else sc-=1;
-    const lab=sc>=2?'🟢 STRONG LONG':sc<=-2?'🔴 STRONG SHORT':'⚪ NEUTRAL / CHOP';
-    const lev=sc>=2?'success':sc<=-2?'danger':'muted';
-    const bias=sc>=2?'bull':sc<=-2?'bear':'neutral';
-    return{score:sc,label:lab,level:lev,bias};
+    const f_vwap=(closes[c]>=vw)?1:-1, f_ema=(e20>e50)?1:-1, f_rsi=(isFinite(rs)&&rs>50)?1:(isFinite(rs)&&rs<50?-1:0);
+    const sc=f_vwap+f_ema+f_rsi;
+    let lab='NEUTRAL / CHOP',lev='muted',bias='neutral';
+    if(sc>=2){lab='STRONG LONG';lev='success';bias='bull';}
+    else if(sc<=-2){lab='STRONG SHORT';lev='danger';bias='bear';}
+    return{score:sc,label:lab,level:lev,bias,factors:{vwap:f_vwap,ema:f_ema,rsi:f_rsi}};
 }
 function evalVCP(d){
     const{n,highs,lows,closes}=d;
     if(n<60)return{detected:false,label:'INSUFF DATA',level:'muted'};
     const atrA=rmaATR(highs,lows,closes,14),curA=atrA[n-1],tight=(curA/closes[n-1])<0.02;
-    if(tight)return{detected:true,label:'🟢 VALID VCP COIL',level:'success',buyPoint:+(highs[n-1]+0.05).toFixed(2)};
-    return{detected:false,label:'⚪ NO VCP',level:'muted'};
+    if(tight)return{detected:true,label:'VALID VCP COIL',level:'success',buyPoint:+(highs[n-1]+0.05).toFixed(2)};
+    return{detected:false,label:'NO VCP',level:'muted'};
 }
-function evalGreeks(spot,strike,type='CE',ivPct=18,dte=7,r=6.75){
-    const S=Number(spot)||0,K=Number(strike)||0,sigma=(Number(ivPct)||18)/100,T=Math.max(Number(dte)||1,1e-6)/365,R=(Number(r)||6.75)/100;
-    if(S<=0||K<=0)return{delta:0,gamma:0,theta:0,vega:0,price:0};
+function evalGreeks(spot,strike,type,ivPct,dte,r){
+    const S=Number(spot)||0,K=Number(strike)||0,sigma=(Number(ivPct)||18)/100,T=Math.max(Number(dte)||1,1)/365,R=(Number(r)||6.75)/100;
+    if(S<=0||K<=0||sigma<=0||T<=0)return{delta:0,gamma:0,theta:0,vega:0,price:0,iv_pct:ivPct||18};
     const sqrtT=Math.sqrt(T),d1=(Math.log(S/K)+(R+0.5*sigma*sigma)*T)/(sigma*sqrtT),d2=d1-sigma*sqrtT;
     const npdf=x=>Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI);
     const ncdf=x=>{const t=1/(1+0.2316419*Math.abs(x));const poly=t*(0.319381530+t*(-0.356563782+t*(1.781477937+t*(-1.821255978+t*1.330274429))));const c=1-npdf(Math.abs(x))*poly;return x>=0?c:1-c;};
@@ -399,7 +402,7 @@ function evalGreeks(spot,strike,type='CE',ivPct=18,dte=7,r=6.75){
     if(type==='PE'){delta=ncdf(d1)-1;price=K*Math.exp(-R*T)*ncdf(-d2)-S*ncdf(-d1);}
     else{delta=ncdf(d1);price=S*ncdf(d1)-K*Math.exp(-R*T)*ncdf(d2);}
     const gamma=npdf(d1)/(S*sigma*sqrtT),vega=(S*npdf(d1)*sqrtT)/100;
-    return{delta:+delta.toFixed(4),gamma:+gamma.toFixed(6),vega:+vega.toFixed(2),price:+price.toFixed(2)};
+    return{delta:+delta.toFixed(4),gamma:+gamma.toFixed(6),vega:+vega.toFixed(2),price:+price.toFixed(2),theta:0,rho:0,iv_pct:ivPct||18};
 }
 
 /* ========== MESSAGE ROUTER ========== */
@@ -415,11 +418,11 @@ self.onmessage=e=>{
             divergence:divergences(d),doubleBottom:doubleBottom(d),flag:flagPattern(d),
             masterPro:evalMasterPro(d),nextCandle:evalNextCandle(d),orderFlow:evalOrderFlow(d),
             pivots:evalPreMarket(d),
-            tradePlan:evalTradePlan(d,msg.opts?.capital,msg.opts?.riskPct),
+            tradePlan:evalTradePlan(d,msg.opts&&msg.opts.capital,msg.opts&&msg.opts.riskPct),
             trendBias:evalTrendBias(d),vcp:evalVCP(d),
             greeks:greeksOpt?evalGreeks(greeksOpt.spot,greeksOpt.strike,greeksOpt.type,greeksOpt.iv,greeksOpt.dte):null,
             meta:{n:d.n,tf,symbol:msg.symbol||'',ts:Date.now()}
         };
         self.postMessage({type:'result',id:msg.id,result});
-    }catch(err){self.postMessage({type:'result',id:msg.id,result:null,error:String(err)});}
+    }catch(err){self.postMessage({type:'result',id:msg.id,result:null,error:String(err),stack:err&&err.stack});}
 };

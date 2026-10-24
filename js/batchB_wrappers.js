@@ -5,15 +5,7 @@
  * rendering continues to work until first worker result arrives.
  * ============================================================ */
 class MasterProEngine {
-    analyze(candles) {
-        return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.masterPro) || {
-            squeeze: { active: false, label: '—', level: 'muted' },
-            vsa: { label: '—', level: 'muted' },
-            macd: { label: '—', level: 'muted' },
-            rsi: { label: '—', level: 'muted' },
-            score: 0
-        };
-    }
+    analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.masterPro) || {}; }
 }
 class NextCandlePredictor {
     analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.nextCandle) || { direction: 'neutral', score: 0, confidence: 'low', factors: [] }; }
@@ -27,7 +19,7 @@ class PreMarketEngine {
     analyze(candles) { return this.calculatePivots(); }
 }
 class TradingPlanEngine {
-    plan(candles, bias) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.tradePlan) || { ready: false, reason: 'Waiting for worker' }; }
+    plan(candles, bias) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.tradePlan) || { ready: false, reason: 'No strong bias yet' }; }
 }
 class TrendBiasEngine {
     analyze(candles) { return (window.analyticsBridge && window.analyticsBridge._latest && window.analyticsBridge._latest.trendBias) || { score: 0, label: 'NEUTRAL', level: 'muted', bias: 'neutral', factors: {} }; }

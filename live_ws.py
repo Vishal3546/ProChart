@@ -130,6 +130,13 @@ class LiveTickClient:
             # Only enforce staleness when we actually have subscriptions AND have seen at least one tick
             if not self._subscribed or self._last_tick_ts == 0:
                 continue
+            # 🚀 PRO FIX: Don't force reconnect on weekends / outside market hours (no ticks expected)
+            try:
+                from nse_calendar import nse_calendar
+                if not nse_calendar.market_status().get("market_open", True):
+                    continue
+            except Exception:
+                pass
             age = time.time() - self._last_tick_ts
             if age > STALE_SEC:
                 log.warning(f"⏰ WS stale ({age:.0f}s no ticks) — forcing reconnect")

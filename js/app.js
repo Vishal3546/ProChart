@@ -532,9 +532,30 @@ class App {
     async loadChartData(symbol, tf, opts = {}) {
         const isRetry = !!opts.retry;
         const isFirstLoad = !!opts.firstLoad;
+        // PRO: cancel any pending retry from a PREVIOUS symbol/tf (prevents WIPRO+RELIANCE token mix)
+        if (!isRetry && this._retryLoadTimer) {
+            clearTimeout(this._retryLoadTimer);
+            this._retryLoadTimer = null;
+        }
+        // Stale retry guard — token/symbol must still match what user selected
+        if (isRetry) {
+            if (symbol !== this.activeSymbol || tf !== this.activeTimeframe) return;
+            if (opts.token && opts.token !== this.activeToken) return;
+        }
         const prevSymbol = this.activeSymbol;
         this.activeSymbol = symbol;
         this.activeTimeframe = tf;
+
+        // 🚀 PRO FIX: Sync activeToken/exchange if explicit values passed in opts
+        if (opts.token) {
+            this.activeToken = opts.token;
+            localStorage.setItem('prochart_token', opts.token);
+        }
+        if (opts.exchange) {
+            this.activeExchange = opts.exchange;
+            localStorage.setItem('prochart_exchange', opts.exchange);
+        }
+
         localStorage.setItem('prochart_symbol', symbol);
         localStorage.setItem('prochart_tf', tf);
 
@@ -617,7 +638,14 @@ class App {
             } else {
                 waitMs = Math.min(2000 * this._retryCount, 15000);
             }
-            this._retryLoadTimer = setTimeout(() => this.loadChartData(symbol, tf, { retry: true }), waitMs);
+            const retryToken = this.activeToken;
+            const retryExch = this.activeExchange;
+            this._retryLoadTimer = setTimeout(() => {
+                // Only retry if user is STILL on this symbol/tf AND token hasn't changed
+                if (this.activeSymbol !== symbol || this.activeTimeframe !== tf) return;
+                if (this.activeToken !== retryToken) return;
+                this.loadChartData(symbol, tf, { retry: true, token: retryToken, exchange: retryExch });
+            }, waitMs);
             return;
         }
         // Render fresh data ALWAYS when AngelOne, or when nothing is shown yet
@@ -813,16 +841,16 @@ class App {
             }
             const bd = document.getElementById('trendBiasBreakdown');
             if (bd) {
-                const f = tb.factors;
+                const f = tb.factors || {};
                 const line = (name, v, bullTxt, bearTxt) => {
-                    const cls = v > 0 ? 'bias-fbull' : v < 0 ? 'bias-fbear' : 'bias-fneutral';
-                    const txt = v > 0 ? bullTxt : bearTxt;
-                    return `<div class="${cls}">${name}: ${txt}</div>`;
+                    const n = Number(v) || 0;
+                    const cls = n > 0 ? 'bias-fbull' : n < 0 ? 'bias-fbear' : 'bias-fneutral';
+                    return `<div class="${cls}">${name}: ${n > 0 ? bullTxt : n < 0 ? bearTxt : 'flat'}</div>`;
                 };
                 bd.innerHTML = [
                     line('VWAP',  f.vwap,  'above ✓', 'below ✗'),
                     line('EMA',   f.ema,   '20>50 ✓', '20<50 ✗'),
-                    line('RSI',   f.rsi,   '>50 ✓', '<50 ✗'),
+                    line('RSI',   f.rsi,   '>50 ✓',   '<50 ✗'),
                 ].join('');
             }
             // Optional: tint chart background subtly when bias is strong
@@ -836,26 +864,33 @@ class App {
 
         // Trading plan (entry/sl/target) when bias is strong
         try {
-            const plan = this.tradingPlanEngine.plan(data, tb);
+            const plan = this.tradingPlanEngine.plan(data, tb) || {};
             const el = document.getElementById('tradePlanResult');
-            if (el && plan.ready) {
+            const _num = (v) => (v != null && isFinite(Number(v)) ? Number(v) : null);
+            const entry = _num(plan.entry), sl = _num(plan.sl), t1 = _num(plan.t1), t2 = _num(plan.t2);
+            const atr = _num(plan.atr), rr1 = _num(plan.rr1), rr2 = _num(plan.rr2);
+            const dist = _num(plan.dist_pct);
+            const ready = !!(plan.ready && entry != null && sl != null && t1 != null && t2 != null);
+            if (el && ready) {
                 const sideColor = plan.direction === 'LONG' ? '#089981' : '#f23645';
-                const actionTxt = plan.actionable ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>' : `⏳ Pending (${Math.abs(plan.dist_pct).toFixed(2)}% away)`;
+                const actionTxt = plan.actionable
+                    ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>'
+                    : `⏳ Pending (${dist != null ? Math.abs(dist).toFixed(2) : '—'}% away)`;
                 el.innerHTML = `
                     <div style="font-size:13px;font-weight:800;color:${sideColor};margin-bottom:6px;text-align:center;">
-                        ${plan.direction} — ${actionTxt}
+                        ${plan.direction || '—'} — ${actionTxt}
                     </div>
-                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${plan.entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason}</span></div>
-                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${plan.sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason}</span></div>
-                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${plan.t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason}</span></div>
-                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${plan.t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
+                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason || ''}</span></div>
+                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason || ''}</span></div>
+                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason || ''}</span></div>
+                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-top:8px;font-size:10px;text-align:center;font-family:'JetBrains Mono',monospace;">
-                        <div>ATR<br><b>${plan.atr.toFixed(2)}</b></div>
-                        <div>RR1<br><b style="color:${plan.rr1>=1.5?'#089981':'#f23645'}">1:${plan.rr1.toFixed(2)}</b></div>
-                        <div>RR2<br><b style="color:${plan.rr2>=2?'#089981':'#ffae00'}">1:${plan.rr2.toFixed(2)}</b></div>
+                        <div>ATR<br><b>${atr != null ? atr.toFixed(2) : '—'}</b></div>
+                        <div>RR1<br><b style="color:${(rr1||0)>=1.5?'#089981':'#f23645'}">1:${rr1 != null ? rr1.toFixed(2) : '—'}</b></div>
+                        <div>RR2<br><b style="color:${(rr2||0)>=2?'#089981':'#ffae00'}">1:${rr2 != null ? rr2.toFixed(2) : '—'}</b></div>
                     </div>
-                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${plan.rr1>=1.5?'#089981':'#f23645'};">${plan.verdict}</div>
-                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk}</b> shares</div>
+                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${(rr1||0)>=1.5?'#089981':'#f23645'};">${plan.verdict || ''}</div>
+                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk ?? '—'}</b> shares</div>
                 `;
                 el.className = '';
             } else if (el) {
@@ -997,17 +1032,17 @@ class App {
                 el.classList.add(map[tb.level] || 'bias-neutral');
             }
             const bd = document.getElementById('trendBiasBreakdown');
-            if (bd && tb.factors) {
-                const f = tb.factors;
+            if (bd) {
+                const f = tb.factors || {};
                 const line = (name, v, bullTxt, bearTxt) => {
-                    const cls = v > 0 ? 'bias-fbull' : v < 0 ? 'bias-fbear' : 'bias-fneutral';
-                    const txt = v > 0 ? bullTxt : bearTxt;
-                    return `<div class="${cls}">${name}: ${txt}</div>`;
+                    const n = Number(v) || 0;
+                    const cls = n > 0 ? 'bias-fbull' : n < 0 ? 'bias-fbear' : 'bias-fneutral';
+                    return `<div class="${cls}">${name}: ${n > 0 ? bullTxt : n < 0 ? bearTxt : 'flat'}</div>`;
                 };
                 bd.innerHTML = [
                     line('VWAP',  f.vwap||0,  'above ✓', 'below ✗'),
                     line('EMA',   f.ema||0,   '20>50 ✓', '20<50 ✗'),
-                    line('RSI',   f.rsi||0,   '>50 ✓', '<50 ✗'),
+                    line('RSI',   f.rsi||0,   '>50 ✓',   '<50 ✗'),
                 ].join('');
             }
             const chartWrap = document.getElementById('mainTvChart');
@@ -1018,26 +1053,33 @@ class App {
             }
         } catch (e) {}
         try {
-            const plan = this.tradingPlanEngine.plan(data, null);
+            const plan = this.tradingPlanEngine.plan(data, null) || {};
             const el = document.getElementById('tradePlanResult');
-            if (el && plan.ready) {
+            const _num = (v) => (v != null && isFinite(Number(v)) ? Number(v) : null);
+            const entry = _num(plan.entry), sl = _num(plan.sl), t1 = _num(plan.t1), t2 = _num(plan.t2);
+            const atr = _num(plan.atr), rr1 = _num(plan.rr1), rr2 = _num(plan.rr2);
+            const dist = _num(plan.dist_pct);
+            const ready = !!(plan.ready && entry != null && sl != null && t1 != null && t2 != null);
+            if (el && ready) {
                 const sideColor = plan.direction === 'LONG' ? '#089981' : '#f23645';
-                const actionTxt = plan.actionable ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>' : `⏳ Pending (${Math.abs(plan.dist_pct).toFixed(2)}% away)`;
+                const actionTxt = plan.actionable
+                    ? '<span style="color:#ffae00;font-weight:700">⚡ ACTION NOW</span>'
+                    : `⏳ Pending (${dist != null ? Math.abs(dist).toFixed(2) : '—'}% away)`;
                 el.innerHTML = `
                     <div style="font-size:13px;font-weight:800;color:${sideColor};margin-bottom:6px;text-align:center;">
-                        ${plan.direction} — ${actionTxt}
+                        ${plan.direction || '—'} — ${actionTxt}
                     </div>
-                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${plan.entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason}</span></div>
-                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${plan.sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason}</span></div>
-                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${plan.t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason}</span></div>
-                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${plan.t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
+                    <div class="plan-row"><span>Entry</span><b style="color:#ffd700">${entry.toFixed(2)}</b><span class="plan-sub">${plan.entryReason || ''}</span></div>
+                    <div class="plan-row"><span>Stop Loss</span><b style="color:#f23645">${sl.toFixed(2)}</b><span class="plan-sub">${plan.slReason || ''}</span></div>
+                    <div class="plan-row"><span>Target 1</span><b style="color:#089981">${t1.toFixed(2)}</b><span class="plan-sub">${plan.t1Reason || ''}</span></div>
+                    <div class="plan-row"><span>Target 2</span><b style="color:#2962ff">${t2.toFixed(2)}</b><span class="plan-sub">1:2 RR</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-top:8px;font-size:10px;text-align:center;font-family:'JetBrains Mono',monospace;">
-                        <div>ATR<br><b>${plan.atr.toFixed(2)}</b></div>
-                        <div>RR1<br><b style="color:${plan.rr1>=1.5?'#089981':'#f23645'}">1:${plan.rr1.toFixed(2)}</b></div>
-                        <div>RR2<br><b style="color:${plan.rr2>=2?'#089981':'#ffae00'}">1:${plan.rr2.toFixed(2)}</b></div>
+                        <div>ATR<br><b>${atr != null ? atr.toFixed(2) : '—'}</b></div>
+                        <div>RR1<br><b style="color:${(rr1||0)>=1.5?'#089981':'#f23645'}">1:${rr1 != null ? rr1.toFixed(2) : '—'}</b></div>
+                        <div>RR2<br><b style="color:${(rr2||0)>=2?'#089981':'#ffae00'}">1:${rr2 != null ? rr2.toFixed(2) : '—'}</b></div>
                     </div>
-                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${plan.rr1>=1.5?'#089981':'#f23645'};">${plan.verdict}</div>
-                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk}</b> shares</div>
+                    <div style="font-size:10px;text-align:center;margin-top:6px;font-weight:700;color:${(rr1||0)>=1.5?'#089981':'#f23645'};">${plan.verdict || ''}</div>
+                    <div style="font-size:10px;opacity:0.75;text-align:center;margin-top:4px;">Qty (₹${(plan.capital_used||100000).toLocaleString('en-IN')} @ ${plan.risk_pct||1}% risk): <b style="color:#fff">${plan.qty_at_risk ?? '—'}</b> shares</div>
                 `;
                 el.className = '';
             } else if (el) {
